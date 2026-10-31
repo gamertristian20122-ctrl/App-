@@ -115,6 +115,11 @@ export interface ObjectStorage {
   getToFile(key: string, path: string): Promise<void>
   head(key: string): Promise<ObjectHead | null>
   delete(key: string): Promise<void>
+  /**
+   * Server-side copy (R2 CopyObject / UploadPartCopy above 5 GB): no bytes pass through the caller.
+   * Optional so simple fakes need not implement it; callers fall back to putFile.
+   */
+  copy?(fromKey: string, toKey: string): Promise<void>
 }
 
 // ---------------------------------------------------------------------------

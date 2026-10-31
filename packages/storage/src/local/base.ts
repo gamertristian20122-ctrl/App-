@@ -93,6 +93,16 @@ export abstract class LocalStorageBase implements ObjectStorage, MultipartStorag
   abstract head(key: string): Promise<ObjectHead | null>
   abstract delete(key: string): Promise<void>
 
+  /** Server-side copy (same contract as R2's): streams the stored object into `toKey`. */
+  async copy(fromKey: string, toKey: string): Promise<void> {
+    const from = checkKey(fromKey)
+    const to = checkKey(toKey)
+    if (from === to) return
+    const obj = await this.openObject(from)
+    if (!obj) throw storageError('not_found', 'The object to copy does not exist.')
+    await this.receivePut(to, obj.contentType, obj.read(0, obj.bytes), obj.bytes)
+  }
+
   // --- MultipartStorage ---------------------------------------------------------
 
   async createMultipartUpload(key: string, contentType: string): Promise<{ uploadId: string }> {

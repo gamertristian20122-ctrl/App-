@@ -125,6 +125,12 @@ export interface ImageRule {
   min: number
   max: number
   maxBytes: number
+  /**
+   * Image MIME types the platform accepts, when it is pickier than "any common image"
+   * (docs/research/platform-limits.md). Others get a warning (Upload-Post may convert them;
+   * not verified), never a blocking error.
+   */
+  formats?: readonly string[]
 }
 
 export interface PlatformRules {
@@ -163,7 +169,7 @@ export const PLATFORM_RULES: Readonly<Record<Platform, PlatformRules>> = {
     title: { max: 90, unit: 'utf16', required: false },
     textOnly: false,
     video: { minMs: 3 * SEC, maxMs: 10 * MIN, maxBytes: 4 * GB_BYTES },
-    image: { min: 1, max: 35, maxBytes: 20 * MB },
+    image: { min: 1, max: 35, maxBytes: 20 * MB, formats: ['image/jpeg', 'image/webp'] },
     mixedMedia: false,
     maxLinks: null,
     linksAllowed: true,
@@ -193,7 +199,7 @@ export const PLATFORM_RULES: Readonly<Record<Platform, PlatformRules>> = {
     title: null,
     textOnly: false,
     video: { minMs: 3 * SEC, maxMs: 15 * MIN, maxBytes: 300 * MB },
-    image: { min: 1, max: 10, maxBytes: 8 * MB },
+    image: { min: 1, max: 10, maxBytes: 8 * MB, formats: ['image/jpeg'] },
     mixedMedia: true,
     maxLinks: null,
     linksAllowed: true,
@@ -381,6 +387,7 @@ export type IssueCode =
   | 'too_many_videos'
   | 'mixed_media_not_supported'
   | 'file_too_large'
+  | 'image_format'
   | 'video_too_short'
   | 'video_too_long'
   | 'links_not_allowed'
@@ -712,6 +719,19 @@ function validateMedia(
       limit: rules.image.min,
       actual: images.length,
     })
+  }
+  if (rules.image?.formats) {
+    const formats = rules.image.formats
+    const odd = images.filter((img) => typeof img.mimeType === 'string' && img.mimeType !== '' && !formats.includes(img.mimeType.split(';')[0]?.trim().toLowerCase() ?? ''))
+    if (odd.length > 0) {
+      const names = formats.map((f) => f.replace('image/', '').toUpperCase()).join(' or ')
+      add({
+        field: 'media',
+        code: 'image_format',
+        severity: 'warning',
+        message: `This platform takes ${names} images; ${odd.length === 1 ? 'one image is' : `${odd.length} images are`} another format and may be rejected.`,
+      })
+    }
   }
   if (rules.image) {
     for (const img of images) {

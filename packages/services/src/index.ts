@@ -34,7 +34,7 @@ export { MAX_TRANSCRIPT_CHARS, searchSegments, type TranscriptMatch, type Transc
 export type { RenderJobInput, RenderOutput } from './clips'
 export type { DraftPreview, DraftSummary, DraftView, PreviewMedia, PreviewVariant, VariantAccount, VariantView } from './drafts'
 export { channelsFor, nonceError, type ApprovalVia, type IssuedNonce, type NonceCheck, type NonceProblem } from './approvals'
-export { busiestWindowCount, exceedsCap, nextFreeSlot, type CalendarItem, type PublishPlan, type StatusResult } from './posts'
+export { busiestWindowCount, exceedsCap, nextFreeSlot, type CalendarItem, type PublishPlan, type ResumePlan, type StatusResult } from './posts'
 export { engagementScore, type VoiceProfileView, type VoiceSample } from './voice'
 export type { ImportRequestResult } from './imports'
 export type { BrandAnalytics, FollowerChange, PeriodTotals, PostPerformance, WeeklyReview } from './analytics'

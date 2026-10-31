@@ -1,0 +1,27 @@
+# Railway config-as-code for the worker. Two Railway services run this same image and file
+# (Service settings → Config-as-code path: apps/worker/railway.toml; Root directory: /):
+#
+#   service "worker-posting"  variables: WORKER_TYPES=posting  WORKER_CONCURRENCY=4
+#       publish_post, check_post_status, analytics_pull, import_past_posts, cleanup
+#       + the scheduler (hourly cleanup, daily account analytics, lost-publish sweep)
+#   service "worker-media"    variables: WORKER_TYPES=media    WORKER_CONCURRENCY=1 (or 2 on larger instances)
+#       source_ingest, transcribe, clip_render, carousel_render, video_render (ffmpeg + Chromium)
+#
+# Both services also need the shared variables (DATABASE_URL via the Supabase session pooler on
+# 5432, R2_*, UPLOAD_POST_API_KEY, TRANSCRIPTION_*, TOKEN_ENCRYPTION_KEYS, APP_URL, APP_ENV, ...).
+# Replicas are safe: jobs are claimed with FOR UPDATE SKIP LOCKED and scheduled jobs use
+# idempotency keys. Railway sets PORT; the worker serves GET /health on it.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/worker/Dockerfile"
+watchPatterns = ["apps/worker/**", "packages/**", "pnpm-lock.yaml", "package.json"]
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+# SIGTERM → SIGKILL window. The worker stops claiming, lets running jobs finish for this long minus
+# ~10 s (it reads RAILWAY_DEPLOYMENT_DRAINING_SECONDS), then aborts and releases the rest.
+drainingSeconds = 120

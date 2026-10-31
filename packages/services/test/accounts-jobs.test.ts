@@ -88,6 +88,25 @@ describe('jobs', () => {
     expect(() => parseJobPayload('clip_render', { userId })).toThrow(/clip_render job payload/)
   })
 
+  it('release puts a running job back without using up its attempt; extendLease takes the app clock', async () => {
+    const { job } = await h.s.jobs.enqueue({ type: 'cleanup', payload: {}, idempotencyKey: 'cleanup:release' })
+    const now = new Date(Date.now() + 1000)
+    const [claimed] = await h.s.jobs.claim({ workerId: 'w1', types: ['cleanup'], leaseSec: 60, now })
+    expect(claimed?.attempts).toBe(1)
+    expect(await h.s.jobs.extendLease(job.id, 'w2', 60, now)).toBe(false)
+    expect(await h.s.jobs.extendLease(job.id, 'w1', 120, now)).toBe(true)
+    const [row] = await h.db.query<{ locked_until: Date }>('select locked_until from public.jobs where id = $1', [job.id])
+    expect(new Date(row?.locked_until ?? 0).getTime()).toBe(now.getTime() + 120_000)
+    expect(await h.s.jobs.release(job.id, 'w2', now)).toBe(false)
+    expect(await h.s.jobs.release(job.id, 'w1', now)).toBe(true)
+    const [back] = await h.db.query<{ status: string; attempts: number; locked_by: string | null }>(
+      'select status, attempts, locked_by from public.jobs where id = $1',
+      [job.id],
+    )
+    expect(back).toEqual({ status: 'queued', attempts: 0, locked_by: null })
+    expect(await h.s.jobs.release(job.id, 'w1', now)).toBe(false)
+  })
+
   it('users can only see their own jobs', async () => {
     const a = await tenant(h)
     const b = await tenant(h)

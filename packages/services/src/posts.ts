@@ -109,6 +109,11 @@ export type PublishPlan =
   | { action: 'deferred'; reason: 'cap' | 'held' | 'brand_paused'; until: Date; post: PostRow }
   | { action: 'failed'; reason: 'account' | 'media' | 'brand'; message: string; post: PostRow }
 
+export type ResumePlan =
+  | { action: 'publish'; post: PostRow; input: PublishInput }
+  | { action: 'skip'; reason: 'not_interrupted'; post: PostRow }
+  | { action: 'failed'; reason: 'resume'; message: string; post: PostRow }
+
 export interface StatusResult {
   post: PostRow
   /** When the next status poll is queued (pending). */
@@ -450,6 +455,54 @@ export function createPostsService(ctx: Ctx) {
       })
     },
 
+    /**
+     * publish_post job for a post that is `publishing` without a provider request id (an earlier
+     * run was interrupted between the claim and recordPublishRequest, or the provider's answer was
+     * unclear). Rebuilds the provider input under the same checks as preparePublish (approval at the
+     * post's stored revision, brand, account, media) without claiming again, so the worker can
+     * publish with the SAME attempt's idempotency key. Problems fail the post (audited).
+     */
+    async resumePublish(userId: string, postId: string): Promise<ResumePlan> {
+      const uid = userIdOf(userId)
+      return ctx.tx(async (r): Promise<ResumePlan> => {
+        const post = await requirePost(r, uid, postId)
+        if (post.status !== 'publishing' || post.providerRequestId) return { action: 'skip', reason: 'not_interrupted', post }
+        const fail = async (message: string): Promise<ResumePlan> => ({ action: 'failed', reason: 'resume', message, post: await failIn(r, uid, post, message) })
+        const draft = await r.drafts.get(uid, post.draftId)
+        if (!draft) return fail('Something this post needs was deleted, so it was not published.')
+        // same condition as posts.claimForPublish: still approved, at the revision the post was scheduled from
+        if (draft.status !== 'approved' || draft.revision !== post.approvedRevision || draft.approvedRevision !== post.approvedRevision) {
+          return fail('The draft changed after it was approved, so this post was not published. Approve it again to publish it.')
+        }
+        const variant = await r.drafts.getVariant(uid, post.variantId)
+        if (!variant) return fail('This version of the draft was removed, so the post was not published.')
+        const brand = await r.brands.get(uid, post.brandId)
+        if (!brand || brand.status === 'archived') return fail('The brand was archived.')
+        if (!brand.providerProfileRef) return fail('The brand is not set up for posting yet.')
+        const account = await r.accounts.get(uid, post.connectedAccountId)
+        const problem = accountProblem(post.platform, account)
+        if (problem) return fail(problem)
+        const media = await r.media.getMany(uid, variant.mediaIds)
+        const byId = new Map(media.map((m) => [m.id, m]))
+        const ordered = variant.mediaIds.map((m) => byId.get(m))
+        if (ordered.some((m) => !m || m.status !== 'ready')) return fail('An attached file is missing or not ready.')
+        const ready = ordered.filter((m): m is NonNullable<typeof m> => m !== undefined)
+        const mediaUrls: string[] = []
+        for (const m of ready) mediaUrls.push(await ctx.storage.presignGet(m.storageKey, ctx.config.publishUrlTtlSec))
+        const input: PublishInput = {
+          profileRef: brand.providerProfileRef,
+          platform: post.platform,
+          kind: contentKindFor(ready),
+          text: variant.text,
+          ...(variant.title ? { title: variant.title } : {}),
+          mediaUrls,
+          options: variant.options,
+          idempotencyKey: `post:${post.id}:${Math.max(1, post.attempts)}`,
+        }
+        return { action: 'publish', post, input }
+      })
+    },
+
     /** After provider.publish: stores the request id and queues the first status poll. */
     async recordPublishRequest(userId: string, postId: string, requestId: string): Promise<PostRow> {
       const uid = userIdOf(userId)
@@ -480,9 +533,17 @@ export function createPostsService(ctx: Ctx) {
       return ctx.tx(async (r): Promise<StatusResult> => {
         const post = await requirePost(r, uid, postId)
         if (s.state === 'published') {
-          if (post.status === 'published') return { post }
-          if (post.status !== 'publishing' && post.status !== 'failed') return { post }
           const url = s.url && /^https?:\/\//.test(s.url) ? s.url : null
+          if (post.status === 'published') {
+            // TikTok (and others) may confirm the platform post id / permalink hours after the
+            // publish: fill in what was missing, never overwrite, never re-run onPublished.
+            const lateId = s.postId && !post.providerPostId ? s.postId : null
+            const lateUrl = url && !post.postUrl ? url : null
+            if (!lateId && !lateUrl) return { post }
+            const row = await r.posts.markPublished(uid, post.id, { providerPostId: lateId, postUrl: lateUrl, publishedAt: null })
+            return { post: row ?? post }
+          }
+          if (post.status !== 'publishing' && post.status !== 'failed') return { post }
           const row = await r.posts.markPublished(uid, post.id, { providerPostId: s.postId ?? null, postUrl: url, publishedAt: ctx.now() })
           if (!row) return { post }
           await onPublishedIn(r, uid, row)
@@ -558,6 +619,53 @@ export function createPostsService(ctx: Ctx) {
         if (result.created) created += 1
       }
       return created
+    },
+
+    /**
+     * Sweeper (cleanup): posts stuck in `publishing` with no live publish_post / check_post_status
+     * job (the job died: worker crash on its last attempt, database errors on every retry).
+     * - No provider request id: one resume publish_post job per attempt (the worker publishes again
+     *   with the same idempotency key, so the provider dedupes); if that one died too, the post fails.
+     * - With a request id: one final status check; if that one died too, the post fails.
+     * Nothing is ever published twice and nothing stays `publishing` forever.
+     */
+    async recoverStuckPublishing(now: Date = ctx.now(), limit = 100): Promise<{ resumed: number; rechecked: number; failed: number }> {
+      const stuck = await ctx.repos.maintenance.listStuckPublishingPosts(limit)
+      const out = { resumed: 0, rechecked: 0, failed: 0 }
+      for (const post of stuck) {
+        await ctx.tx(async (r) => {
+          const current = await r.posts.get(post.userId, post.id)
+          if (!current || current.status !== 'publishing') return
+          const enqueued = current.providerRequestId
+            ? await enqueueJob(r, {
+                type: 'check_post_status',
+                payload: { userId: post.userId, postId: post.id, poll: ctx.config.statusPollMaxPolls },
+                runAt: now,
+                idempotencyKey: `check_post_status:${post.id}:recover:${current.attempts}`,
+              })
+            : await enqueueJob(r, {
+                type: 'publish_post',
+                payload: { userId: post.userId, postId: post.id },
+                runAt: now,
+                idempotencyKey: `publish_post:${post.id}:resume:${current.attempts}`,
+              })
+          if (enqueued.created) {
+            if (current.providerRequestId) out.rechecked += 1
+            else out.resumed += 1
+            return
+          }
+          await failIn(
+            r,
+            post.userId,
+            current,
+            current.providerRequestId
+              ? 'The platform did not confirm the post. Check the account before retrying.'
+              : 'Publishing was interrupted and could not be confirmed. Check the account before retrying.',
+          )
+          out.failed += 1
+        })
+      }
+      return out
     },
 
     /** Validated post id helper for callers holding raw input. */

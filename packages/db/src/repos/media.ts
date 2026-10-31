@@ -173,6 +173,21 @@ export async function update(db: Db, userId: string, mediaId: string, patch: Upd
   )
 }
 
+/**
+ * Points a pending media row at a new storage key (an upload promoted to its immutable source key).
+ * Only moves a row that is still pending and still at `fromKey`; null otherwise.
+ */
+export async function moveStorageKey(db: Db, userId: string, mediaId: string, fromKey: string, toKey: string): Promise<MediaRow | null> {
+  return map(
+    await db.one(
+      `update public.media_assets set storage_key = $4
+        where id = $1 and user_id = $2 and storage_key = $3 and status = 'pending'
+        returning *`,
+      [mediaId, userId, fromKey, toKey],
+    ),
+  )
+}
+
 /** Sum of bytes of the user's stored (not deleted) media, for the storage allowance. */
 export async function storageBytes(db: Db, userId: string): Promise<number> {
   const row = await db.one<{ n: unknown }>(

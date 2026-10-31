@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createTestUser } from '@app/db/testing'
 import { clipReserveKey } from '../src'
-import { DAY, browserPut, createHarness, expectAppError, resetHarness, tenant, type Harness } from './helpers'
+import { sourceKey } from '@app/storage'
+import { DAY, OTHER_UUID, browserPut, createHarness, expectAppError, resetHarness, tenant, type Harness } from './helpers'
 
 let h: Harness
 beforeAll(async () => {
@@ -293,5 +294,26 @@ describe('media.markIngested + usage metering', () => {
     await h.s.media.remove(userId, res.media.id)
     expect((await h.s.usage.balance(userId)).used).toBe(0)
     h.clock.advance(DAY)
+  })
+})
+
+describe('media.promoteSource (worker ingest)', () => {
+  it('moves a pending clip-source upload to its own sources/ key only', async () => {
+    const { userId } = await tenant(h)
+    const res = await h.s.media.createUpload(userId, { filename: 'a.mp4', contentType: 'video/mp4', bytes: 10, rightsAttested: true }, { purpose: 'clip_source' })
+    const from = res.media.storageKey
+    expect(from).toContain('/uploads/')
+    const to = sourceKey(userId, res.media.id, 'mp4')
+    await expectAppError(h.s.media.promoteSource(userId, res.media.id, from, sourceKey(userId, OTHER_UUID, 'mp4')), 'validation')
+    await expectAppError(h.s.media.promoteSource(userId, res.media.id, from, from), 'validation')
+    const moved = await h.s.media.promoteSource(userId, res.media.id, from, to)
+    expect(moved?.storageKey).toBe(to)
+    // a second move from the old key finds nothing (raced / already moved)
+    expect(await h.s.media.promoteSource(userId, res.media.id, from, to)).toBeNull()
+    // other users and post videos cannot
+    const other = await tenant(h)
+    await expectAppError(h.s.media.promoteSource(other.userId, res.media.id, to, to), 'not_found')
+    const post = await h.s.media.createUpload(userId, { filename: 'b.mp4', contentType: 'video/mp4', bytes: 10 }, { purpose: 'post' })
+    await expectAppError(h.s.media.promoteSource(userId, post.media.id, post.media.storageKey, sourceKey(userId, post.media.id, 'mp4')), 'validation')
   })
 })

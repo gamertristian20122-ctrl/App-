@@ -37,7 +37,29 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
 
 export type ErrorDetails = Readonly<Record<string, unknown>>
 
+/**
+ * Registry-wide brand on every AppError instance. Bundlers (Next.js route handlers vs. pages,
+ * vitest module graphs) can load this module more than once, so a services instance built in one
+ * bundle throws AppErrors whose class is not the other bundle's `AppError`. `Symbol.for` returns
+ * the same symbol in every copy, so `isAppError` and `instanceof AppError` work across them.
+ */
+const APP_ERROR_BRAND = Symbol.for('app.core.AppError')
+
+function hasAppErrorBrand(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[APP_ERROR_BRAND] === true &&
+    isErrorCode((value as { code?: unknown }).code)
+  )
+}
+
 export class AppError extends Error {
+  /** Cross-bundle `instanceof` (see APP_ERROR_BRAND). */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return hasAppErrorBrand(value)
+  }
+
   override readonly name = 'AppError'
   readonly code: ErrorCode
   readonly details: ErrorDetails | undefined
@@ -46,6 +68,7 @@ export class AppError extends Error {
     super(message, options)
     this.code = code
     this.details = details
+    Object.defineProperty(this, APP_ERROR_BRAND, { value: true, enumerable: false })
   }
 
   get status(): number {
@@ -64,8 +87,9 @@ export class AppError extends Error {
   }
 }
 
+/** True for an AppError from any copy of this module (see APP_ERROR_BRAND). */
 export function isAppError(value: unknown): value is AppError {
-  return value instanceof AppError
+  return hasAppErrorBrand(value)
 }
 
 export function isErrorCode(value: unknown): value is ErrorCode {

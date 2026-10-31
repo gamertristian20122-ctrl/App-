@@ -160,6 +160,22 @@ export async function extendLease(db: Db, jobId: string, workerId: string, lease
   return rows.length > 0
 }
 
+/**
+ * Puts a running job this worker holds back in the queue without using up its attempt (graceful
+ * shutdown: the handler was interrupted, not failed). False if the lease was lost.
+ */
+export async function release(db: Db, jobId: string, workerId: string, now?: Date): Promise<boolean> {
+  const rows = await db.query(
+    `update public.jobs
+        set status = 'queued', attempts = greatest(attempts - 1, 0), run_at = coalesce($3::timestamptz, now()),
+            locked_by = null, locked_until = null
+      where id = $1 and status = 'running' and locked_by = $2
+      returning id`,
+    [jobId, workerId, now ?? null],
+  )
+  return rows.length > 0
+}
+
 export interface RequeueStaleResult {
   /** Jobs put back to failed (retry now). */
   requeued: number

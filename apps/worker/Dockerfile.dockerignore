@@ -1,0 +1,19 @@
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile (context = repository root).
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/.turbo
+**/tmp
+**/.data
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+.git
+docs
+supabase
+apps/web/*
+!apps/web/package.json
+**/*.test.ts
+**/test

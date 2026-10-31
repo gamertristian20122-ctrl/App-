@@ -63,7 +63,9 @@ export function findMigrationsDir(start: string = process.cwd()): string {
   } catch {
     // bundlers may rewrite import.meta.url; fall back to the cwd walk
   }
-  let dir = resolve(start)
+  // turbopackIgnore: the web bundle must not trace the whole repo for this runtime-only lookup
+  // (production applies migrations with the Supabase CLI; this path serves dev / PGlite / tests).
+  let dir = resolve(/*turbopackIgnore: true*/ start)
   for (;;) {
     candidates.push(join(dir, 'supabase', 'migrations'))
     const parent = dirname(dir)

@@ -240,6 +240,34 @@ describe('R2Storage requests (mocked S3 client)', () => {
   })
 })
 
+describe('R2Storage copy above 5 GB (UploadPartCopy)', () => {
+  it('copies in ranged parts and completes the multipart upload', async () => {
+    const s3 = createFakeS3()
+    const storage = new R2Storage(CONFIG, { client: s3 })
+    const from = uploadKey(USER, MEDIA, 'mp4')
+    // pretend the object is 6 GB: HeadObject reports the size, the copy reads ranges of the stored bytes
+    await storage.putBytes(from, new Uint8Array([1, 2, 3]), 'video/mp4')
+    const real = s3.send.getMockImplementation()
+    if (!real) throw new Error('no fake implementation')
+    const big = 6 * 1024 ** 3
+    s3.send.mockImplementation(async (command) => {
+      if (command.constructor.name === 'HeadObjectCommand') return { ContentLength: big, ContentType: 'video/mp4' }
+      return real(command)
+    })
+    await storage.copy(from, sourceKey(USER, MEDIA, 'mp4'))
+    const names = s3.send.mock.calls.map(([c]) => (c as { constructor: { name: string } }).constructor.name)
+    expect(names.filter((n) => n === 'UploadPartCopyCommand')).toHaveLength(6)
+    expect(names).toContain('CompleteMultipartUploadCommand')
+    expect(names).not.toContain('CopyObjectCommand')
+    const ranges = s3.send.mock.calls
+      .map(([c]) => c as { constructor: { name: string }; input: { CopySourceRange?: string } })
+      .filter((c) => c.constructor.name === 'UploadPartCopyCommand')
+      .map((c) => c.input.CopySourceRange)
+    expect(ranges[0]).toBe(`bytes=0-${1024 ** 3 - 1}`)
+    expect(ranges[5]).toBe(`bytes=${5 * 1024 ** 3}-${big - 1}`)
+  })
+})
+
 describe('mapS3Error', () => {
   it('classifies SDK errors', () => {
     expect(mapS3Error(new S3Error('NoSuchKey', 404), 'x').details).toMatchObject({ reason: 'not_found' })

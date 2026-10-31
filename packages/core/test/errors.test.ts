@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import {
   AppError,
@@ -91,5 +91,28 @@ describe('toErrorBody', () => {
     expect(r.status).toBe(500)
     expect(r.body.error.code).toBe('internal')
     expect(JSON.stringify(r)).not.toContain('hunter2')
+  })
+})
+
+describe('AppError across module copies', () => {
+  it('is recognised when thrown by another copy of the module (separate bundle)', async () => {
+    // A second, independently evaluated copy of errors.ts: what a Next.js route-handler bundle and a
+    // page bundle each get. Its AppError class is a different object from ours.
+    vi.resetModules()
+    const other = await import('../src/errors')
+    expect(other.AppError).not.toBe(AppError)
+    const foreign = new other.AppError('not_found', 'Draft was not found.')
+    expect(isAppError(foreign)).toBe(true)
+    expect(foreign instanceof AppError).toBe(true)
+    expect(toErrorBody(foreign).status).toBe(404)
+    expect(other.isAppError(new AppError('conflict', 'x'))).toBe(true)
+  })
+
+  it('does not accept look-alikes without the brand', () => {
+    const fake = Object.assign(new Error('x'), { name: 'AppError', code: 'not_found' })
+    expect(isAppError(fake)).toBe(false)
+    expect(fake instanceof AppError).toBe(false)
+    expect(isAppError({ code: 'not_found' })).toBe(false)
+    expect(isAppError(null)).toBe(false)
   })
 })

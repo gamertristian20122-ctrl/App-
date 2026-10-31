@@ -82,6 +82,24 @@ export function createFakeS3() {
       case 'DeleteObjectCommand':
         objects.delete(key)
         return {}
+      case 'CopyObjectCommand': {
+        const [bucket, ...rest] = String(input.CopySource).split('/')
+        const src = objects.get(rest.map(decodeURIComponent).join('/'))
+        if (!bucket || !src) throw new S3Error('NoSuchKey', 404)
+        objects.set(key, { body: src.body, contentType: (input.ContentType as string | undefined) ?? src.contentType })
+        return { CopyObjectResult: { ETag: '"etag"' } }
+      }
+      case 'UploadPartCopyCommand': {
+        const upload = uploads.get(String(input.UploadId))
+        if (!upload) throw new S3Error('NoSuchUpload', 404)
+        const [, ...rest] = String(input.CopySource).split('/')
+        const src = objects.get(rest.map(decodeURIComponent).join('/'))
+        if (!src) throw new S3Error('NoSuchKey', 404)
+        const m = /^bytes=(\d+)-(\d+)$/.exec(String(input.CopySourceRange))
+        if (!m) throw new S3Error('InvalidArgument', 400)
+        upload.parts.set(Number(input.PartNumber), src.body.slice(Number(m[1]), Number(m[2]) + 1))
+        return { CopyPartResult: { ETag: `"part-${String(input.PartNumber)}"` } }
+      }
       case 'CreateMultipartUploadCommand': {
         const id = `upload-${++uploadSeq}`
         uploads.set(id, { key, contentType: input.ContentType as string | undefined, parts: new Map() })
@@ -166,6 +184,21 @@ export function objectStorageContract(name: string, make: () => Promise<ObjectSt
       await storage.putBytes(key, new Uint8Array([1, 2, 3]), 'image/jpeg')
       await storage.putBytes(key, new Uint8Array([9]), 'image/jpeg')
       expect(await storage.head(key)).toEqual({ bytes: 1, contentType: 'image/jpeg' })
+    })
+
+    it('copies an object server-side (upload promoted to its source key)', async () => {
+      if (!storage.copy) throw new Error('copy not implemented')
+      const from = uploadKey(USER, MEDIA, 'mp4')
+      const to = sourceKey(USER, MEDIA, 'mp4')
+      const bytes = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])
+      await storage.putBytes(from, bytes, 'video/mp4')
+      await storage.copy(from, to)
+      expect(await storage.head(to)).toEqual({ bytes: 8, contentType: 'video/mp4' })
+      const out = join(dir, 'copied.mp4')
+      await storage.getToFile(to, out)
+      expect(new Uint8Array(await readFile(out))).toEqual(bytes)
+      expect(await storage.head(from)).not.toBeNull()
+      await expect(storage.copy(sourceKey(USER, MEDIA2, 'mkv'), to)).rejects.toMatchObject({ code: 'not_found' })
     })
 
     it('stores empty objects', async () => {

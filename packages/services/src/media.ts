@@ -15,6 +15,7 @@ import {
   MAX_SINGLE_PUT_BYTES,
   checkCompletedParts,
   extForMime,
+  parseKey,
   planParts,
   sourceKey,
   supportsMultipart,
@@ -362,6 +363,23 @@ export function createMediaService(ctx: Ctx) {
         await auditIn(r, uid, { actor: options.via ?? 'web', action: 'media.deleted', subjectType: 'media', subjectId: media.id })
         return mediaView(row ?? media)
       })
+    },
+
+    /**
+     * Worker (source_ingest): moves a pending clip-source upload from its `uploads/` key to its
+     * immutable `sources/` key (the worker has already written the file there), so a still-valid
+     * presigned PUT can no longer swap the file after ingest. Only the media's own source key is
+     * accepted. Returns null when the row is no longer pending at `fromKey` (raced / deleted).
+     */
+    async promoteSource(userId: string, mediaId: string, fromKey: string, toKey: string): Promise<MediaView | null> {
+      const uid = userIdOf(userId)
+      const media = await requireMedia(ctx.repos, uid, mediaId)
+      if (!isClipSource(media) || media.origin !== 'upload') throw validation('Only uploaded clip sources are promoted.')
+      const ext = parseKey(toKey)?.ext
+      if (!ext || toKey !== sourceKey(uid, media.id, ext)) throw validation('The target must be this media’s own source key.')
+      if (typeof fromKey !== 'string' || fromKey.length === 0) throw validation('Invalid source key.')
+      const row = await ctx.repos.media.moveStorageKey(uid, media.id, fromKey, toKey)
+      return row ? mediaView(row) : null
     },
 
     /**

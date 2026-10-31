@@ -154,8 +154,14 @@ export function createJobsService(ctx: Ctx) {
       })
     },
 
-    async extendLease(jobId: string, workerId: string, leaseSec: number) {
-      return ctx.repos.jobs.extendLease(id(jobId, 'Job'), workerIdOf(workerId), Math.max(5, Math.min(3_600, leaseSec)))
+    /** Extends a held lease from `now` (app clock; default the database clock). False if the lease was lost. */
+    async extendLease(jobId: string, workerId: string, leaseSec: number, now?: Date) {
+      return ctx.repos.jobs.extendLease(id(jobId, 'Job'), workerIdOf(workerId), Math.max(5, Math.min(3_600, Math.floor(leaseSec))), now)
+    },
+
+    /** running → queued without using up the attempt (worker shutdown). False if the lease was lost. */
+    async release(jobId: string, workerId: string, now?: Date) {
+      return ctx.repos.jobs.release(id(jobId, 'Job'), workerIdOf(workerId), now)
     },
 
     /** Expired leases (crashed workers) → retry now, or dead when out of attempts. */

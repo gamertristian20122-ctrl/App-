@@ -231,6 +231,23 @@ describe('validateVariant: media', () => {
   })
 })
 
+describe('validateVariant: image formats (integration)', () => {
+  it('warns (never blocks) when Instagram gets a non-JPEG or TikTok a PNG', () => {
+    const png = { kind: 'image' as const, bytes: 1000, mimeType: 'image/png' }
+    const jpeg = { kind: 'image' as const, bytes: 1000, mimeType: 'image/jpeg' }
+    const ig = validateVariant('instagram', { text: 'hi', mediaIds: ['a'] }, { media: [png] })
+    expect(ig.map((i) => [i.code, i.severity])).toEqual([['image_format', 'warning']])
+    expect(ig[0]?.message).toMatch(/JPEG images/)
+    expect(validateVariant('instagram', { text: 'hi', mediaIds: ['a'] }, { media: [jpeg] })).toEqual([])
+    const tt = { text: 'hi', mediaIds: ['a'], options: { privacyLevel: 'PUBLIC_TO_EVERYONE' } }
+    expect(codes(validateVariant('tiktok', tt, { media: [png] }))).toEqual(['image_format'])
+    expect(validateVariant('tiktok', tt, { media: [{ ...png, mimeType: 'image/webp' }] })).toEqual([])
+    // other platforms take PNG; unknown types are not guessed
+    expect(validateVariant('x', { text: 'hi', mediaIds: ['a'] }, { media: [png] })).toEqual([])
+    expect(validateVariant('instagram', { text: 'hi', mediaIds: ['a'] }, { media: [{ kind: 'image', bytes: 1000 }] })).toEqual([])
+  })
+})
+
 describe('validateVariant: options', () => {
   it('TikTok needs an explicit privacy level before publishing', () => {
     const v = { text: 'hi', mediaIds: ['v'] }

@@ -1,4 +1,13 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Test-only: the fakes used by test/ (not runtime dependencies of @app/mcp; see vitest.config.ts).
+    "paths": {
+      "@app/db": ["../db/src/index.ts"],
+      "@app/db/testing": ["../db/src/testing.ts"],
+      "@app/posting": ["../posting/src/index.ts"],
+      "@app/storage": ["../storage/src/index.ts"]
+    }
+  },
   "include": ["src", "test", "vitest.config.ts"]
 }

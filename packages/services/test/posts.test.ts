@@ -241,3 +241,86 @@ describe('posts: the publish cycle (worker)', () => {
     expect(await h.s.posts.enqueueDue(new Date(START.getTime() + 2 * HOUR))).toBe(0)
   })
 })
+
+describe('posts: interrupted publishes and late confirmations (integration)', () => {
+  /** A post claimed for publishing whose publish job then died (worker crash on its last attempt). */
+  async function stuckPost(text = 'stuck') {
+    const t = await xTenant()
+    const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text }])
+    const [post] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: 'now' })
+    if (!post) throw new Error('post missing')
+    const plan = await h.s.posts.preparePublish(t.userId, post.id)
+    if (plan.action !== 'publish') throw new Error(`expected publish, got ${plan.action}`)
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where payload->>'postId' = $1`, [post.id])
+    return { t, post: plan.post, draft: d }
+  }
+
+  it('resumePublish rebuilds the input for a publishing post without a request id, same attempt key', async () => {
+    const { t, post } = await stuckPost('resume me')
+    const plan = await h.s.posts.resumePublish(t.userId, post.id)
+    if (plan.action !== 'publish') throw new Error(`expected publish, got ${plan.action}`)
+    expect(plan.input).toMatchObject({ platform: 'x', kind: 'text', text: 'resume me', idempotencyKey: `post:${post.id}:${post.attempts}` })
+    expect(plan.post.status).toBe('publishing')
+    // once the request id is stored there is nothing to resume
+    await h.s.posts.recordPublishRequest(t.userId, post.id, 'req-1')
+    expect((await h.s.posts.resumePublish(t.userId, post.id)).action).toBe('skip')
+    // other users cannot
+    const other = await xTenant()
+    await expectAppError(h.s.posts.resumePublish(other.userId, post.id), 'not_found')
+  })
+
+  it('resumePublish fails the post when the account was disconnected meanwhile', async () => {
+    const { t, post } = await stuckPost()
+    await h.r.accounts.setStatus(t.userId, t.account.id, 'disconnected')
+    const plan = await h.s.posts.resumePublish(t.userId, post.id)
+    expect(plan.action).toBe('failed')
+    expect((await h.s.posts.get(t.userId, post.id)).status).toBe('failed')
+  })
+
+  it('cleanup resumes a stuck publish once, then fails it if the resume job died too', async () => {
+    const { t, post } = await stuckPost()
+    const first = await h.s.maintenance.cleanup({ now: h.clock.now() })
+    expect(first.stuckPublishing).toEqual({ resumed: 1, rechecked: 0, failed: 0 })
+    const resume = (await h.s.jobs.listForUser(t.userId, { type: 'publish_post' })).filter((j) => j.status === 'queued')
+    expect(resume).toHaveLength(1)
+    // a live job: nothing more to do
+    expect((await h.s.maintenance.cleanup({ now: h.clock.now() })).stuckPublishing).toEqual({ resumed: 0, rechecked: 0, failed: 0 })
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where payload->>'postId' = $1`, [post.id])
+    expect((await h.s.maintenance.cleanup({ now: h.clock.now() })).stuckPublishing).toEqual({ resumed: 0, rechecked: 0, failed: 1 })
+    const failed = await h.s.posts.get(t.userId, post.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.error).toMatch(/interrupted/)
+  })
+
+  it('cleanup re-checks a stuck post that has a request id (final poll), then fails it', async () => {
+    const { t, post } = await stuckPost()
+    await h.s.posts.recordPublishRequest(t.userId, post.id, 'req-2')
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where payload->>'postId' = $1`, [post.id])
+    expect((await h.s.maintenance.cleanup({ now: h.clock.now() })).stuckPublishing).toEqual({ resumed: 0, rechecked: 1, failed: 0 })
+    const checks = (await h.s.jobs.listForUser(t.userId, { type: 'check_post_status' })).filter((j) => j.status === 'queued')
+    expect(checks).toHaveLength(1)
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where payload->>'postId' = $1`, [post.id])
+    expect((await h.s.maintenance.cleanup({ now: h.clock.now() })).stuckPublishing.failed).toBe(1)
+    expect((await h.s.posts.get(t.userId, post.id)).status).toBe('failed')
+  })
+
+  it('a late confirmation fills in the post id and URL of a published post without re-running side effects', async () => {
+    const t = await tenant(h)
+    await connect(h, t.userId, t.brandId, 'linkedin')
+    const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'linkedin', text: 'late' }])
+    const [post] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: 'now' })
+    await h.s.posts.preparePublish(t.userId, post?.id ?? '')
+    await h.s.posts.recordPublishRequest(t.userId, post?.id ?? '', 'req-3')
+    const first = await h.s.posts.recordPublishStatus(t.userId, post?.id ?? '', { state: 'published' })
+    expect(first.post).toMatchObject({ status: 'published', providerPostId: null, postUrl: null })
+    const publishedAt = first.post.publishedAt
+    h.clock.advance(DAY)
+    const late = await h.s.posts.recordPublishStatus(t.userId, post?.id ?? '', { state: 'published', postId: '7301', url: 'https://www.linkedin.com/feed/update/7301' })
+    expect(late.post).toMatchObject({ status: 'published', providerPostId: '7301', postUrl: 'https://www.linkedin.com/feed/update/7301' })
+    expect(late.post.publishedAt?.toISOString()).toBe(publishedAt?.toISOString())
+    // never overwritten, analytics checkpoints not queued twice
+    const again = await h.s.posts.recordPublishStatus(t.userId, post?.id ?? '', { state: 'published', postId: 'other', url: 'https://x.invalid/other' })
+    expect(again.post.providerPostId).toBe('7301')
+    expect(await h.s.jobs.listForUser(t.userId, { type: 'analytics_pull' })).toHaveLength(4)
+  })
+})

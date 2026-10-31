@@ -23,6 +23,8 @@ export interface CleanupResult {
   requeuedJobs: number
   deadJobs: number
   duePostsQueued: number
+  /** Posts stuck in `publishing` whose job died: resumed (same idempotency key), re-checked, or failed. */
+  stuckPublishing: { resumed: number; rechecked: number; failed: number }
   /** Clip-time reservations of sources that will never be transcribed, given back. */
   releasedReservations: number
   /** Registered OAuth clients that never got (or no longer hold) a code or token. */
@@ -42,8 +44,8 @@ export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsSer
   return withErrors({
     /**
      * The `cleanup` job: expired nonces / OAuth codes / tokens, old finished jobs, clip-source
-     * files past the 30-day retention (file deleted, row kept as `deleted`), stale job leases, and
-     * due posts whose publish job was lost.
+     * files past the 30-day retention (file deleted, row kept as `deleted`), stale job leases,
+     * due posts whose publish job was lost, and posts stuck in `publishing` whose job died.
      */
     async cleanup(options: { now?: Date; sourceBatch?: number } = {}): Promise<CleanupResult> {
       const now = options.now ?? ctx.now()
@@ -79,6 +81,7 @@ export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsSer
 
       const stale2 = await r.jobs.requeueStale(now)
       const duePostsQueued = await deps.posts.enqueueDue(now)
+      const stuckPublishing = await deps.posts.recoverStuckPublishing(now)
 
       // Auto-refund: sources whose transcription will never finish (media failed/deleted, the
       // transcribe job died without reporting, or no transcript after a grace period).
@@ -117,6 +120,7 @@ export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsSer
         requeuedJobs: stale2.requeued,
         deadJobs: stale2.dead,
         duePostsQueued,
+        stuckPublishing,
         releasedReservations,
         deletedOAuthClients,
       }

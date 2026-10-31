@@ -82,6 +82,26 @@ export async function listDuePosts(db: Db, now: Date, limit = 100): Promise<Post
   return camelRows<PostRow>(rows)
 }
 
+/**
+ * Posts in `publishing` that no live job (queued / running / failed-awaiting-retry publish_post or
+ * check_post_status) refers to: their job died, so nothing would ever settle them.
+ */
+export async function listStuckPublishingPosts(db: Db, limit = 100): Promise<PostRow[]> {
+  const rows = await db.query(
+    `select p.* from public.posts p
+      where p.status = 'publishing'
+        and not exists (
+          select 1 from public.jobs j
+           where j.type in ('publish_post', 'check_post_status')
+             and j.status in ('queued', 'running', 'failed')
+             and j.payload->>'postId' = p.id::text)
+      order by p.updated_at
+      limit $1`,
+    [Math.max(1, Math.min(1000, limit))],
+  )
+  return camelRows<PostRow>(rows)
+}
+
 /** Published posts whose publication time falls in [from, to) (analytics checkpoints). */
 export async function listPublishedBetween(db: Db, from: Date, to: Date, limit = 1000): Promise<PostRow[]> {
   const rows = await db.query(

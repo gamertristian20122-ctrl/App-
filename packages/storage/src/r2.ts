@@ -22,6 +22,7 @@ import { pipeline } from 'node:stream/promises'
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
+  CopyObjectCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -29,6 +30,7 @@ import {
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
+  UploadPartCopyCommand,
 } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import type { Logger } from '@app/core/log'
@@ -350,6 +352,52 @@ export class R2Storage implements ObjectStorage, MultipartStorage {
     } catch (err) {
       const mapped = mapS3Error(err, 'Delete')
       if (mapped.code !== 'not_found') throw mapped
+    }
+  }
+
+  /**
+   * Server-side copy: CopyObject up to 5 GB, UploadPartCopy (multipart) above. No bytes pass
+   * through this process (the worker promotes a 10 GB upload without re-uploading it).
+   */
+  async copy(fromKey: string, toKey: string): Promise<void> {
+    const from = checkKey(fromKey)
+    const to = checkKey(toKey)
+    if (from === to) return
+    const head = await this.head(from)
+    if (!head) throw storageError('not_found', 'The object to copy does not exist.')
+    const copySource = `${this.bucket}/${from.split('/').map(encodeURIComponent).join('/')}`
+    if (head.bytes <= MAX_SINGLE_PUT_BYTES) {
+      await this.send(
+        new CopyObjectCommand({ Bucket: this.bucket, Key: to, CopySource: copySource, ContentType: head.contentType, MetadataDirective: 'REPLACE' }),
+        'Copy',
+      )
+      return
+    }
+    const { uploadId } = await this.createMultipartUpload(to, head.contentType)
+    try {
+      // copy parts can be up to 5 GB; 1 GiB parts keep the request count low
+      const plan = planParts(head.bytes, Math.max(this.partBytes, 1024 * 1024 * 1024))
+      const done: CompletedPart[] = []
+      for (const part of plan) {
+        const out = await this.send<{ CopyPartResult?: { ETag?: string } }>(
+          new UploadPartCopyCommand({
+            Bucket: this.bucket,
+            Key: to,
+            UploadId: uploadId,
+            PartNumber: part.partNumber,
+            CopySource: copySource,
+            CopySourceRange: `bytes=${part.start}-${part.end - 1}`,
+          }),
+          'Copy part',
+        )
+        const etag = out?.CopyPartResult?.ETag
+        if (!etag) throw storageError('storage_unavailable', 'Storage did not confirm a copied part.')
+        done.push({ partNumber: part.partNumber, etag })
+      }
+      await this.completeMultipartUpload(to, uploadId, done)
+    } catch (err) {
+      await this.abortMultipartUpload(to, uploadId).catch(() => undefined)
+      throw err
     }
   }
 
