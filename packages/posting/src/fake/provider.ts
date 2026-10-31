@@ -29,6 +29,12 @@ export interface FakePostingProviderOptions {
   pastPostsPerPlatform?: number
   /** Origin of fake connect/post URLs. Default https://fake-posting.invalid */
   baseUrl?: string
+  /**
+   * Report every platform as connected for every profile, with the same deterministic ids in
+   * every process. For test deployments on serverless hosts, where in-memory state is not shared
+   * between requests. Default false.
+   */
+  connectAll?: boolean
 }
 
 export interface FakeUpload {
@@ -109,6 +115,7 @@ export class FakePostingProvider implements PostingProvider {
   private readonly clock: Clock
   private readonly baseUrl: string
   private readonly autoConnect: boolean
+  private readonly connectAll: boolean
   private readonly strictAccounts: boolean
   private readonly pastPostsPerPlatform: number
   private statusDelay: number
@@ -123,6 +130,7 @@ export class FakePostingProvider implements PostingProvider {
     this.clock = options.clock ?? { now: () => new Date() }
     this.baseUrl = (options.baseUrl ?? 'https://fake-posting.invalid').replace(/\/+$/, '')
     this.autoConnect = options.autoConnect ?? true
+    this.connectAll = options.connectAll ?? false
     this.strictAccounts = options.strictAccounts ?? false
     this.statusDelay = Math.max(0, options.statusDelay ?? 0)
     this.pastPostsPerPlatform = Math.max(0, options.pastPostsPerPlatform ?? 12)
@@ -255,6 +263,7 @@ export class FakePostingProvider implements PostingProvider {
   async listAccounts(profileRef: string): Promise<ProviderAccount[]> {
     this.enter('listAccounts', profileRef)
     const ref = parse(ProfileRefSchema, profileRef, 'Profile id')
+    if (this.connectAll) for (const p of PLATFORMS) if (!this.profile(ref).accounts.has(p)) this.connectAccount(ref, p)
     const accounts = this.profiles.get(ref)?.accounts
     return PLATFORMS.flatMap((p) => {
       const a = accounts?.get(p)

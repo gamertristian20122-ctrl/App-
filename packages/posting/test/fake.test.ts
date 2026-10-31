@@ -244,3 +244,19 @@ describe('FakePostingProvider: analytics and past posts', () => {
     })
   })
 })
+
+describe('connectAll (serverless test deployments)', () => {
+  it('reports every platform connected, with the same ids in separate instances', async () => {
+    const a = new FakePostingProvider({ connectAll: true })
+    const b = new FakePostingProvider({ connectAll: true })
+    const fromA = await a.listAccounts('fake_brand_one')
+    const fromB = await b.listAccounts('fake_brand_one')
+    expect(fromA).toHaveLength(9)
+    expect(fromA.every((acc) => acc.status === 'active')).toBe(true)
+    expect(fromB).toEqual(fromA)
+  })
+
+  it('is off by default', async () => {
+    expect(await new FakePostingProvider().listAccounts('fake_brand_one')).toEqual([])
+  })
+})

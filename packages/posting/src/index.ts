@@ -77,7 +77,7 @@ export interface PostingDeps {
 /** Builds the provider selected by POSTING_PROVIDER (web app and worker use this). */
 export function createPostingProviderFromConfig(
   config: Pick<Config, 'POSTING_PROVIDER' | 'UPLOAD_POST_API_KEY' | 'UPLOAD_POST_BASE_URL'> &
-    Partial<Pick<Config, 'UPLOAD_POST_PROFILE_PREFIX'>>,
+    Partial<Pick<Config, 'UPLOAD_POST_PROFILE_PREFIX' | 'FAKE_POSTING_CONNECT_ALL'>>,
   deps: PostingDeps = {},
 ): PostingProvider {
   if (config.POSTING_PROVIDER === 'upload_post') {
@@ -92,7 +92,7 @@ export function createPostingProviderFromConfig(
       connectPage: deps.connectPage,
     })
   }
-  return createPostingProvider({ kind: 'fake', clock: deps.clock })
+  return createPostingProvider({ kind: 'fake', clock: deps.clock, connectAll: config.FAKE_POSTING_CONNECT_ALL ?? false })
 }
 
 /** UPLOAD_POST_WEBHOOK_SECRET may hold "current,previous" while rotating. */

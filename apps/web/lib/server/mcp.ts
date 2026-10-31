@@ -8,9 +8,15 @@ import type { Config } from '@app/core/config'
 /** MCP Inspector's default local origins (allowed outside production only). */
 const DEV_BROWSER_CLIENT_ORIGINS = ['http://localhost:6274', 'http://127.0.0.1:6274']
 
+/**
+ * Hosted AI clients, in case their servers or web apps send an Origin header. Every request still
+ * needs a valid bearer token for this user, so accepting these origins grants nothing by itself.
+ */
+const AI_CLIENT_ORIGINS = ['https://claude.ai', 'https://claude.com', 'https://chatgpt.com', 'https://chat.openai.com']
+
 /** Extra origins accepted besides the app's own (passed to handleMcpRequest as allowedOrigins). */
 export function mcpAllowedOrigins(config: Pick<Config, 'APP_ENV'>): string[] {
-  return config.APP_ENV === 'production' ? [] : [...DEV_BROWSER_CLIENT_ORIGINS]
+  return config.APP_ENV === 'production' ? [...AI_CLIENT_ORIGINS] : [...AI_CLIENT_ORIGINS, ...DEV_BROWSER_CLIENT_ORIGINS]
 }
 
 const ALLOW_HEADERS = [

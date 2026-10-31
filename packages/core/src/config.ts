@@ -80,6 +80,12 @@ export const ConfigSchema = z
 
     // --- posting provider -----------------------------------------------------
     POSTING_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['upload_post', 'fake']).default('fake')),
+    /**
+     * Fake provider only: report every platform as connected for every brand. The fake keeps
+     * state in memory, which serverless hosts (Vercel) do not share between requests, so test
+     * deployments need this for connected accounts to stick.
+     */
+    FAKE_POSTING_CONNECT_ALL: flag.default(false),
     UPLOAD_POST_API_KEY: optionalSecret(),
     /** Override the provider API base URL (tests, proxies). The adapter has the default. */
     UPLOAD_POST_BASE_URL: optionalUrl,
@@ -231,11 +237,21 @@ export const CONFIG_KEYS = Object.keys(ConfigSchema.in.shape) as ConfigKey[]
 export type EnvSource = Readonly<Record<string, string | undefined>>
 
 /**
+ * Fills APP_URL from Vercel's stable production domain when it is not set, so a first deploy
+ * works before the owner knows the URL. An explicit APP_URL always wins.
+ */
+export function withHostDefaults(env: EnvSource): EnvSource {
+  const vercelHost = env.VERCEL_PROJECT_PRODUCTION_URL?.trim()
+  if (env.APP_URL?.trim() || !vercelHost) return env
+  return { ...env, APP_URL: `https://${vercelHost}` }
+}
+
+/**
  * Validates the environment. Throws AppError('internal') listing the problems by variable name
  * (values are never included in the message).
  */
 export function loadConfig(env: EnvSource = process.env): Config {
-  const result = ConfigSchema.safeParse(env)
+  const result = ConfigSchema.safeParse(withHostDefaults(env))
   if (!result.success) {
     const problems = result.error.issues.map((i) => {
       const key = i.path.map(String).join('.') || 'env'

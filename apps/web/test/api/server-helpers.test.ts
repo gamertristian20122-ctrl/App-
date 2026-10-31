@@ -111,7 +111,8 @@ describe('OAuth helpers', () => {
 describe('MCP CORS', () => {
   it('reflects only allowed origins', () => {
     const cfg = { APP_URL: 'https://app.example', APP_ENV: 'production' as const }
-    expect(mcpAllowedOrigins(cfg)).toEqual([])
+    expect(mcpAllowedOrigins(cfg)).toEqual(['https://claude.ai', 'https://claude.com', 'https://chatgpt.com', 'https://chat.openai.com'])
+    expect(mcpAllowedOrigins(cfg)).not.toContain('http://localhost:6274')
     expect(mcpCorsHeaders(new Request('https://app.example/api/mcp', { headers: { origin: 'https://app.example' } }), cfg)['access-control-allow-origin']).toBe('https://app.example')
     expect(mcpCorsHeaders(new Request('https://app.example/api/mcp', { headers: { origin: 'http://localhost:6274' } }), cfg)).toEqual({})
     expect(mcpCorsHeaders(new Request('https://app.example/api/mcp'), cfg)).toEqual({})

@@ -1,7 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm --filter @app/db run migrate --build && next build",
   "crons": [
-    { "path": "/api/cron/cleanup", "schedule": "23 4 * * *" },
-    { "path": "/api/cron/analytics", "schedule": "41 5 * * *" }
+    {
+      "path": "/api/cron/cleanup",
+      "schedule": "23 4 * * *"
+    },
+    {
+      "path": "/api/cron/analytics",
+      "schedule": "41 5 * * *"
+    }
   ]
 }

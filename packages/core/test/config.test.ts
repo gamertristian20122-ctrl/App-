@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { CONFIG_KEYS, loadConfig, requireConfig } from '../src/config'
+import { CONFIG_KEYS, loadConfig, requireConfig, withHostDefaults } from '../src/config'
 import { AppError } from '../src/errors'
 import { TEST_TOKEN_ENCRYPTION_KEYS, testConfig } from '../src/testing'
 
@@ -146,3 +146,29 @@ describe('.env.example', () => {
     expect(() => loadConfig(env)).not.toThrow()
   })
 })
+
+describe('withHostDefaults', () => {
+  it('uses the Vercel production domain when APP_URL is empty', () => {
+    expect(withHostDefaults({ VERCEL_PROJECT_PRODUCTION_URL: 'clipcast.vercel.app' }).APP_URL).toBe('https://clipcast.vercel.app')
+    expect(withHostDefaults({ APP_URL: '', VERCEL_PROJECT_PRODUCTION_URL: 'clipcast.vercel.app' }).APP_URL).toBe(
+      'https://clipcast.vercel.app',
+    )
+  })
+
+  it('keeps an explicit APP_URL, and changes nothing off Vercel', () => {
+    expect(withHostDefaults({ APP_URL: 'https://app.example.com', VERCEL_PROJECT_PRODUCTION_URL: 'x.vercel.app' }).APP_URL).toBe(
+      'https://app.example.com',
+    )
+    expect(withHostDefaults({}).APP_URL).toBeUndefined()
+  })
+
+  it('is applied by loadConfig', () => {
+    const c = loadConfig({ ...testConfigEnv(), APP_URL: '', VERCEL_PROJECT_PRODUCTION_URL: 'clipcast.vercel.app' })
+    expect(c.APP_URL).toBe('https://clipcast.vercel.app')
+    expect(c.MCP_RESOURCE_URL).toBe('https://clipcast.vercel.app/api/mcp')
+  })
+})
+
+function testConfigEnv(): Record<string, string> {
+  return { TOKEN_ENCRYPTION_KEYS: TEST_TOKEN_ENCRYPTION_KEYS, SESSION_SECRET: 'x'.repeat(40) }
+}

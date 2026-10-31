@@ -36,6 +36,11 @@ describe('createPostingProviderFromConfig', () => {
     expect(createPostingProviderFromConfig(testConfig())).toBeInstanceOf(FakePostingProvider)
   })
 
+  it('passes FAKE_POSTING_CONNECT_ALL to the fake provider', async () => {
+    const provider = createPostingProviderFromConfig(testConfig({ FAKE_POSTING_CONNECT_ALL: '1' }))
+    expect(await provider.listAccounts('fake_brand_x')).toHaveLength(9)
+  })
+
   it('uses UPLOAD_POST_API_KEY and UPLOAD_POST_BASE_URL', async () => {
     const m = mockFetch([{ json: { profile: { username: 'b', social_accounts: {} } } }])
     const config = testConfig({ POSTING_PROVIDER: 'upload_post', UPLOAD_POST_API_KEY: API_KEY, UPLOAD_POST_BASE_URL: 'https://proxy.test' })

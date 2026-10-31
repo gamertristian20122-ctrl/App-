@@ -9,7 +9,15 @@ import { createPostgresDb } from './postgres'
 import { installSupabaseShim } from './supabase-shim'
 
 async function main(): Promise<void> {
-  const url = process.env.DATABASE_URL?.trim() || null
+  // --build: run from a hosting build step (Vercel). Does nothing unless RUN_MIGRATIONS=1, and
+  // then requires a database URL (MIGRATION_DATABASE_URL, else DATABASE_URL).
+  const build = process.argv.includes('--build')
+  if (build && process.env.RUN_MIGRATIONS?.trim() !== '1') {
+    process.stdout.write('migrations skipped (set RUN_MIGRATIONS=1 to run them during the build)\n')
+    return
+  }
+  const url = (build ? process.env.MIGRATION_DATABASE_URL?.trim() : null) || process.env.DATABASE_URL?.trim() || null
+  if (build && !url) throw new Error('RUN_MIGRATIONS=1 needs MIGRATION_DATABASE_URL or DATABASE_URL')
   const dir = process.env.MIGRATIONS_DIR?.trim() || findMigrationsDir()
   const log = (message: string) => process.stdout.write(`${message}\n`)
   if (url) {
