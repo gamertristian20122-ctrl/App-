@@ -123,7 +123,7 @@ paths, and adds tests that run the real chain end to end.
    validate the rest with zod). 2. `MCP_ALLOWED_ORIGINS` — **deferred** (optional; only browser
    MCP clients need it). 3. Account-status lookup without profile / `wwwAuthenticate` path —
    **deferred** (optional; `accounts.sync` covers it). 4. Turbopack trace — **resolved** (#12).
-5. `middleware.ts` → `proxy.ts` — **deferred** (works; `proxy` would move it off Edge).
+5. `middleware.ts` → `proxy.ts` — **resolved** by the e2e pass (`docs/E2E.md`, fix 10).
 6. Ops — **open, ops** (below). Decision 1 (Cursor) — **resolved** (#10).
 
 ### web-frontend.md
@@ -150,6 +150,7 @@ paths, and adds tests that run the real chain end to end.
 
 - Nothing has run against live Supabase, Stripe, Upload-Post, R2, Whisper/AssemblyAI, or a real
   Claude / ChatGPT / Cursor client; the Docker image has not been built (no daemon here). The
-  approval card has only been exercised in `node:vm`.
+  whole product now runs end to end on one machine with fakes and stubs (`pnpm e2e`,
+  `docs/E2E.md`), including the approval card in a Chromium MCP Apps host harness.
 - Whether Upload-Post converts PNG/WebP for Instagram/TikTok is unverified (we warn; carousels are JPEG).
 - Rate limits and webhook de-duplication are per instance (no shared store).

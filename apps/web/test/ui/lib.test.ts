@@ -11,6 +11,7 @@ import { excerpt, formatBytes, formatChange, formatClipHours, formatCount, forma
 import { param, safeExternalUrl, safeNextPath, withQuery } from '@/lib/ui/paths'
 import { addDaysToKey, dayKey, isDayKey, monthRange, timeZoneOptions, toLocalInputValue, weekRange, zonedLocalToUtc } from '@/lib/ui/time'
 import { contentTypeFor, normalizeUploadResponse, safePutHeaders, uploadFile, UploadError, type UploadDeps } from '@/lib/ui/upload'
+import { meterTone } from '@/components/ui/primitives'
 import { form } from './harness'
 
 describe('format', () => {
@@ -42,12 +43,30 @@ describe('format', () => {
   })
 })
 
+describe('meterTone', () => {
+  it('warns on allowances but treats a full set of brand slots as normal (e2e: 1 of 1 brands was red)', () => {
+    expect(meterTone(1, 1, 'slots')).toBe('bg-indigo-600')
+    expect(meterTone(3, 2, 'slots')).toBe('bg-red-500')
+    expect(meterTone(3_600, 3_600)).toBe('bg-red-500')
+    expect(meterTone(3_000, 3_600)).toBe('bg-amber-500')
+    expect(meterTone(20, 3_600)).toBe('bg-indigo-600')
+  })
+})
+
 describe('time', () => {
   it('converts wall-clock times in a zone to UTC, across DST', () => {
     expect(zonedLocalToUtc('2026-11-03T09:30', 'America/New_York')?.toISOString()).toBe('2026-11-03T14:30:00.000Z')
     expect(zonedLocalToUtc('2026-07-03T09:30', 'America/New_York')?.toISOString()).toBe('2026-07-03T13:30:00.000Z')
     expect(zonedLocalToUtc('2026-03-29T02:30', 'Europe/Berlin')?.toISOString()).toBe('2026-03-29T01:30:00.000Z') // spring-forward gap
     expect(zonedLocalToUtc('2026-11-03T09:30', 'Asia/Kolkata')?.toISOString()).toBe('2026-11-03T04:00:00.000Z')
+    // review: western-hemisphere gaps landed an hour BEFORE the gap (01:30 EST); now 03:30 EDT / PDT
+    expect(zonedLocalToUtc('2027-03-14T02:30', 'America/New_York')?.toISOString()).toBe('2027-03-14T07:30:00.000Z')
+    expect(toLocalInputValue(zonedLocalToUtc('2027-03-14T02:30', 'America/New_York') as Date, 'America/New_York')).toBe('2027-03-14T03:30')
+    expect(zonedLocalToUtc('2027-03-14T02:30', 'America/Los_Angeles')?.toISOString()).toBe('2027-03-14T10:30:00.000Z')
+    // fall-back overlap: a valid time either way; around the gap, ordinary times are unchanged
+    expect(zonedLocalToUtc('2027-03-14T01:30', 'America/New_York')?.toISOString()).toBe('2027-03-14T06:30:00.000Z')
+    expect(zonedLocalToUtc('2027-03-14T03:30', 'America/New_York')?.toISOString()).toBe('2027-03-14T07:30:00.000Z')
+    expect(toLocalInputValue(zonedLocalToUtc('2026-11-01T01:30', 'America/New_York') as Date, 'America/New_York')).toBe('2026-11-01T01:30')
     expect(zonedLocalToUtc('2026-02-30T09:30', 'UTC')).toBeNull()
     expect(zonedLocalToUtc('tomorrow', 'UTC')).toBeNull()
     expect(toLocalInputValue(new Date('2026-11-03T14:30:00Z'), 'America/New_York')).toBe('2026-11-03T09:30')

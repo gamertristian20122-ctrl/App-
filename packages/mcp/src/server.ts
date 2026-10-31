@@ -19,9 +19,9 @@ import { SERVER_NAME, SERVER_VERSION, type McpContext } from './context'
 import { errorResult, invalidArguments, zodProblems } from './errors'
 import { SERVER_INSTRUCTIONS } from './instructions'
 import {
-  PickClipsArgs,
-  WeeklyReviewArgs,
-  WritePostArgs,
+  pickClipsArgs,
+  weeklyReviewArgs,
+  writePostArgs,
   pickClipsPrompt,
   weeklyReviewPrompt,
   writePostPrompt,
@@ -36,6 +36,8 @@ export const SERVER_CAPABILITIES = {
   tools: {},
   prompts: {},
   resources: {},
+  // prompt arguments (brand, source video) offer completions
+  completions: {},
 } as const
 
 const SECURITY_SCHEMES = [{ type: 'oauth2', scopes: [MCP_SCOPE] }]
@@ -106,7 +108,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: 'Write a post in the brand voice',
       description: 'Loads the brand\'s voice profile, best past posts and platform rules, then guides drafting (draft first, the user approves, never publish directly).',
-      argsSchema: WritePostArgs,
+      argsSchema: writePostArgs(ctx),
     },
     (args) => writePostPrompt(ctx, args),
   )
@@ -115,7 +117,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: 'Pick clip moments from a video',
       description: 'Loads a source video\'s transcript with rules for standalone moments with a hook in the first 3 seconds, and how to call make_clips.',
-      argsSchema: PickClipsArgs,
+      argsSchema: pickClipsArgs(ctx),
     },
     (args) => pickClipsPrompt(ctx, args),
   )
@@ -124,7 +126,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: 'Weekly review',
       description: 'Loads the last 7 days of analytics vs the previous 7 and asks for 3 concrete experiments with draft suggestions.',
-      argsSchema: WeeklyReviewArgs,
+      argsSchema: weeklyReviewArgs(ctx),
     },
     (args) => weeklyReviewPrompt(ctx, args),
   )

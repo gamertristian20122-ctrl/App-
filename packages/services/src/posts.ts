@@ -148,6 +148,28 @@ const ProviderRequestSchema = z.string().trim().min(1).max(200)
 
 const publishJobKey = (postId: string, at: Date) => `publish_post:${postId}:${at.getTime()}`
 
+/** The longest wait between checks of a held post (account on hold, brand paused). */
+export const HELD_MAX_DELAY_MS = 7 * DAY_MS
+
+/**
+ * Billing became active again, or a brand was restored: queue the user's held posts (scheduled,
+ * already due) to publish now instead of waiting for their next held check. Returns how many.
+ */
+export async function requeueHeldPostsIn(r: BoundRepos, userId: string, now: Date, brandId?: string): Promise<number> {
+  const due = await r.posts.list(userId, { status: 'scheduled', to: new Date(now.getTime() + 1), limit: 1000, ...(brandId ? { brandId } : {}) })
+  let queued = 0
+  for (const post of due) {
+    const result = await enqueueJob(r, {
+      type: 'publish_post',
+      payload: { userId, postId: post.id },
+      runAt: now,
+      idempotencyKey: `publish_post:${post.id}:unheld:${now.getTime()}`,
+    })
+    if (result.created) queued += 1
+  }
+  return queued
+}
+
 // ---------------------------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------------------------
@@ -241,6 +263,23 @@ export function createPostsService(ctx: Ctx) {
           const problem = accountProblem(variant.platform, account)
           if (problem || !account) throw validation(problem ?? 'Connect an account first.', { platform: variant.platform })
           const active = existing.find((p) => p.variantId === variant.id && (p.status === 'scheduled' || p.status === 'publishing' || p.status === 'published'))
+          if (!active && via !== 'web') {
+            // The person canceled this variant's post after this approval: that withdrew it.
+            const withdrawn = existing.find(
+              (p) =>
+                p.variantId === variant.id &&
+                p.status === 'canceled' &&
+                p.canceledBy === 'web' &&
+                p.approvedRevision === draft.revision &&
+                (draft.approvedAt === null || p.canceledAt === null || p.canceledAt.getTime() >= draft.approvedAt.getTime()),
+            )
+            if (withdrawn) {
+              throw conflict(
+                `The user canceled the ${PLATFORM_LABELS[variant.platform]} post for this approval. Only the user can schedule it again (in the web app), or edit the draft and ask for a new approval with approve_draft.`,
+                { reason: 'canceled_by_user', postId: withdrawn.id, platform: variant.platform },
+              )
+            }
+          }
           if (active && active.status !== 'scheduled') {
             throw conflict(`The ${PLATFORM_LABELS[variant.platform]} post was already published for this approval.`, {
               postId: active.id,
@@ -313,13 +352,18 @@ export function createPostsService(ctx: Ctx) {
       })
     },
 
-    /** Cancels a scheduled (or failed) post. Publishing / published posts cannot be canceled. */
+    /**
+     * Cancels a scheduled (or failed) post. Publishing / published posts cannot be canceled. A
+     * cancel by the person (`via: 'web'`, the default) withdraws the approval for that variant:
+     * schedule() then refuses it for the AI until the person schedules it from the web app or
+     * approves the draft again.
+     */
     async cancel(userId: string, postId: string, options: { via?: Actor; reason?: string } = {}): Promise<PostRow> {
       const uid = userIdOf(userId)
       return ctx.tx(async (r) => {
         const post = await requirePost(r, uid, postId)
         if (post.status === 'canceled') return post
-        const row = await r.posts.cancel(uid, post.id, options.reason?.slice(0, 500) ?? 'Canceled by the user.')
+        const row = await r.posts.cancel(uid, post.id, options.reason?.slice(0, 500) ?? 'Canceled by the user.', options.via ?? 'web')
         if (!row) throw conflict('This post is already publishing or published and cannot be canceled.', { status: post.status })
         await auditIn(r, uid, { actor: options.via ?? 'web', action: 'post.canceled', subjectType: 'post', subjectId: post.id })
         return row
@@ -403,7 +447,10 @@ export function createPostsService(ctx: Ctx) {
         const user = await requireUser(r, uid, true)
         const ent = userEntitlements(user, now)
         if (!ent.canPublish || brand.status === 'suspended') {
-          const until = addMs(now, ctx.config.heldRetryDelayMs)
+          // Check again later, less often the longer it has been on hold (6 h, growing to at most
+          // a week). Billing reactivation and brand restores re-queue held posts right away.
+          const heldFor = Math.max(0, now.getTime() - post.scheduledFor.getTime())
+          const until = addMs(now, Math.min(HELD_MAX_DELAY_MS, Math.max(ctx.config.heldRetryDelayMs, Math.floor(heldFor / 2))))
           await enqueuePublish(r, uid, post.id, until, `publish_post:${post.id}:held:${until.getTime()}`)
           return { action: 'deferred', reason: ent.canPublish ? 'brand_paused' : 'held', until, post }
         }
@@ -610,13 +657,27 @@ export function createPostsService(ctx: Ctx) {
       return ctx.repos.posts.findByProviderRequest(ctx.provider.name, rid, platform)
     },
 
-    /** Sweeper (cron/cleanup): re-queues publish jobs for due scheduled posts whose job was lost. */
+    /**
+     * Sweeper (cron/cleanup): re-queues one publish job for each due scheduled post that no live
+     * publish job refers to (its job was lost). If that sweep job ran and the post is still
+     * scheduled with no live job (it died, or found nothing it could publish), the post fails with
+     * a clear message instead of being swept forever.
+     */
     async enqueueDue(now: Date = ctx.now(), limit = 200): Promise<number> {
       const due = await ctx.repos.maintenance.listDuePosts(now, limit)
       let created = 0
       for (const post of due) {
         const result = await enqueuePublish(ctx.repos, post.userId, post.id, now, `publish_post:${post.id}:sweep:${post.scheduledFor.getTime()}`)
-        if (result.created) created += 1
+        if (result.created) {
+          created += 1
+          continue
+        }
+        if (result.job.status === 'dead' || result.job.status === 'succeeded') {
+          await ctx.tx(async (r) => {
+            const current = await r.posts.get(post.userId, post.id)
+            if (current?.status === 'scheduled') await failIn(r, post.userId, current, 'Publishing could not start. Check the post and schedule it again.')
+          })
+        }
       }
       return created
     },
@@ -654,6 +715,10 @@ export function createPostsService(ctx: Ctx) {
             else out.resumed += 1
             return
           }
+          // Another cleanup run queued that job a moment ago (it is still live): leave it alone.
+          // Only a job that already finished (dead, or done without settling the post) means
+          // recovery failed.
+          if (enqueued.job.status !== 'dead' && enqueued.job.status !== 'succeeded') return
           await failIn(
             r,
             post.userId,

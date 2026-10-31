@@ -7,12 +7,13 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && tsc -p scripts/e2e/tsconfig.json",
     "test": "pnpm -r test",
     "lint": "node scripts/check-boundaries.mjs",
     "build": "pnpm -r build",
     "secrets": "node scripts/generate-secrets.mjs",
-    "test:pg": "node scripts/test-postgres.mjs"
+    "test:pg": "node scripts/test-postgres.mjs",
+    "e2e": "tsx --tsconfig scripts/e2e/tsconfig.json scripts/e2e/run.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

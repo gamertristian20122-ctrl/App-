@@ -1,4 +1,4 @@
-// Middleware logic (Edge runtime: imports only next/server and @supabase/ssr, never @app/*):
+// Proxy (formerly middleware) logic, kept Edge-safe (imports only next/server and @supabase/ssr, never @app/*):
 // - refreshes an expiring Supabase session once per navigation and writes the rotated cookies to
 //   both the downstream request and the response (Server Components cannot set cookies);
 // - adds anti-framing / no-referrer headers to the consent and approval pages;

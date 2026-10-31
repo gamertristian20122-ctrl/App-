@@ -2,9 +2,11 @@
 // its inline script speaks the MCP Apps postMessage protocol. The script runs here in node:vm
 // against a tiny fake DOM (no browser needed) and drives the real server's app-only tools.
 
+import { randomUUID as draftKey } from 'node:crypto'
 import vm from 'node:vm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { TIKTOK_PRIVACY_LABELS, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
 import { APPROVAL_CARD_HTML, APPROVAL_CARD_URI, APPROVAL_META_KEY, MCP_APP_MIME_TYPE, callTool, type McpContext } from '../src'
 import { connect, createHarness, ctxFor, resetHarness, tenant, type Harness } from './helpers'
 
@@ -126,6 +128,9 @@ class FakeNode {
   }
   all(): FakeNode[] {
     return [this, ...this.children.flatMap((c) => c.all())]
+  }
+  getBoundingClientRect(): { width: number; height: number } {
+    return { width: this.scrollWidth, height: this.scrollHeight }
   }
 }
 
@@ -302,6 +307,110 @@ describe('approval card script (MCP Apps protocol)', () => {
     expect(approve?.params).toEqual({ name: 'approval_decide', arguments: { draftId, nonce: newNonce, decision: 'approve' } })
     await answerToolCall(card, ctx)
     expect((await h.services.drafts.get(userId, draftId)).draft).toMatchObject({ status: 'approved', revision: 2 })
+  })
+
+  it('asks who can see a TikTok post and approves once chosen (e2e: worker drafts had no way to set it)', async () => {
+    const { userId, brandId } = await tenant(h, { platforms: ['tiktok'] })
+    const clip = await h.r.media.create(userId, {
+      brandId,
+      kind: 'video',
+      origin: 'clip',
+      status: 'ready',
+      storageKey: `users/${userId}/clips/${draftKey()}.mp4`,
+      mimeType: 'video/mp4',
+      bytes: 3_000_000,
+      durationMs: 20_000,
+      width: 1080,
+      height: 1920,
+    })
+    const view = await h.services.drafts.create(userId, { brandId, variants: [{ platform: 'tiktok', text: 'New clip', mediaIds: [clip.id] }] }, { via: 'worker' })
+    const ctx = ctxFor(h, userId)
+    const result = await callTool(ctx, 'approve_draft', { draftId: view.draft.id })
+    const card = loadCard()
+    card.deliver({ jsonrpc: '2.0', id: card.posted[0]?.id as number, result: { protocolVersion: '2026-01-26', hostCapabilities: {}, hostInfo: { name: 'h', version: '1' }, hostContext: {} } })
+    card.deliver({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: result as Record<string, unknown> })
+    await flush()
+
+    expect(card.root.textContent).toContain('Who can see this TikTok post')
+    expect(card.button('Approve').attributes.has('disabled')).toBe(true)
+    const select = card.root.all().find((n) => n.tagName === 'select')
+    if (!select) throw new Error('no privacy select')
+    // no default: the person must choose (TikTok's rule); the labels match core's
+    expect(select.value).toBe('')
+    const labels = select.children.filter((o) => o.getAttribute('value')).map((o) => o.textContent)
+    expect(labels).toEqual(TIKTOK_PRIVACY_LEVELS.map((l) => TIKTOK_PRIVACY_LABELS[l]))
+
+    select.value = 'SELF_ONLY'
+    select.fire('change')
+    const call = card.posted.filter((m) => m.method === 'tools/call').at(-1)
+    expect(call?.params).toMatchObject({ name: 'approval_edit_variant', arguments: { draftId: view.draft.id, platform: 'tiktok', privacyLevel: 'SELF_ONLY' } })
+    const edited = await answerToolCall(card, ctx)
+    expect(edited.isError ?? false).toBe(false)
+    expect(card.root.textContent).toContain('rev 2')
+
+    card.button('Approve').click()
+    await answerToolCall(card, ctx)
+    expect(card.root.textContent).toContain('Approved')
+    expect(card.root.textContent).not.toContain('Waiting for approval') // the pill follows the decision
+    const saved = await h.services.drafts.get(userId, view.draft.id)
+    expect(saved.draft.status).toBe('approved')
+    expect(saved.variants[0]?.options).toEqual({ privacyLevel: 'SELF_ONLY' })
+  })
+
+  it('shows every option that gets published, e.g. a hidden first comment and collaborators (review: approved unseen)', async () => {
+    const { userId, brandId } = await tenant(h, { platforms: ['instagram'] })
+    const image = await h.r.media.create(userId, {
+      brandId,
+      kind: 'image',
+      origin: 'upload',
+      status: 'ready',
+      storageKey: `users/${userId}/uploads/${draftKey()}.jpg`,
+      mimeType: 'image/jpeg',
+      bytes: 200_000,
+      width: 1080,
+      height: 1350,
+    })
+    const view = await h.services.drafts.create(userId, {
+      brandId,
+      variants: [
+        {
+          platform: 'instagram',
+          text: 'Big launch today!',
+          mediaIds: [image.id],
+          options: { firstComment: 'Get it here https://scam.example', collaborators: ['attacker'], shareToFeed: true },
+        },
+      ],
+    })
+    const ctx = ctxFor(h, userId)
+    const result = await callTool(ctx, 'approve_draft', { draftId: view.draft.id })
+    const card = loadCard()
+    card.deliver({ jsonrpc: '2.0', id: card.posted[0]?.id as number, result: { protocolVersion: '2026-01-26', hostCapabilities: {}, hostInfo: { name: 'h', version: '1' }, hostContext: {} } })
+    card.deliver({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: result as Record<string, unknown> })
+    await flush()
+    const text = card.root.textContent
+    expect(text).toContain('Big launch today!')
+    expect(text).toContain('First comment')
+    expect(text).toContain('Get it here https://scam.example')
+    expect(text).toContain('Collaborators (invited)')
+    expect(text).toContain('attacker')
+    expect(text).toContain('Also share to feed')
+  })
+
+  it('reports its own height, so the host can shrink it again (e2e: stayed tall after Approve)', async () => {
+    const { result } = await setup()
+    const card = loadCard()
+    card.deliver({ jsonrpc: '2.0', id: card.posted[0]?.id as number, result: { protocolVersion: '2026-01-26', hostCapabilities: {}, hostInfo: { name: 'h', version: '1' }, hostContext: {} } })
+    await flush()
+    card.root.scrollHeight = 480
+    card.deliver({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: result as Record<string, unknown> })
+    await flush()
+    // the document is as tall as the iframe the host made; the card is not
+    card.documentElement.scrollHeight = 900
+    card.root.scrollHeight = 140
+    card.deliver({ jsonrpc: '2.0', method: 'ui/notifications/tool-cancelled', params: {} })
+    const sizes = card.posted.filter((m) => m.method === 'ui/notifications/size-changed').map((m) => (m.params as { height: number }).height)
+    expect(sizes.at(-1)).toBe(140)
+    expect(sizes).toContain(480)
   })
 
   it('rejects with a reason', async () => {

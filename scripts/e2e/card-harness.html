@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Apps host harness: approval card</title>
+<style>
+  :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { margin: 0; background: #f4f4f5; color: #18181b; }
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 24px; background: #fff; border-bottom: 1px solid #e4e4e7; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: #16a34a; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header small { color: #71717a; font-size: 12px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; max-width: 1240px; margin: 24px auto; padding: 0 24px; }
+  .chat { display: flex; flex-direction: column; gap: 12px; }
+  .bubble { background: #fff; border: 1px solid #e4e4e7; border-radius: 14px; padding: 12px 16px; font-size: 14px; line-height: 1.45; max-width: 720px; }
+  .bubble.user { align-self: flex-end; background: #18181b; color: #fafafa; border-color: #18181b; }
+  .tool { font-size: 12px; color: #52525b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .frame { background: #fff; border: 1px solid #e4e4e7; border-radius: 14px; overflow: hidden; max-width: 720px; }
+  iframe { display: block; width: 100%; height: 420px; border: 0; }
+  aside { background: #fff; border: 1px solid #e4e4e7; border-radius: 14px; padding: 12px 14px; font-size: 12px; height: fit-content; }
+  aside h2 { font-size: 13px; margin: 0 0 8px; }
+  aside ol { margin: 0; padding-left: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #3f3f46; }
+  aside li { margin: 2px 0; word-break: break-all; }
+  aside li.in { color: #1d4ed8; }
+  aside li.out { color: #15803d; }
+</style>
+</head>
+<body>
+<header><span class="dot"></span><h1>MCP Apps host (test harness)</h1><small>renders ui://approval-card/v1 in a sandboxed iframe and answers its JSON-RPC requests</small></header>
+<main>
+  <section class="chat">
+    <div class="bubble user">Draft a carousel announcing our clipping feature and show it to me for approval.</div>
+    <div class="bubble"><div class="tool" id="tool-line">approve_draft</div><span id="assistant-text">Here is the draft for your review.</span></div>
+    <div class="frame"><iframe id="card" title="Approval card" sandbox="allow-scripts allow-popups"></iframe></div>
+  </section>
+  <aside><h2>Host ⇄ app messages</h2><ol id="log"></ol></aside>
+</main>
+<script>
+/*__DATA__*/
+(function () {
+  'use strict';
+  var data = window.__HARNESS__;
+  var frame = document.getElementById('card');
+  var logList = document.getElementById('log');
+  window.__harnessLog = [];
+  window.__harnessState = { initialized: false, toolCalls: [], openedLinks: [], modelContext: [] };
+
+  function note(dir, text) {
+    window.__harnessLog.push(dir + ' ' + text);
+    var li = document.createElement('li');
+    li.className = dir === '→' ? 'out' : 'in';
+    li.textContent = dir + ' ' + text;
+    logList.appendChild(li);
+  }
+  function send(message) {
+    frame.contentWindow.postMessage(message, '*');
+    note('→', message.method || ('result #' + message.id));
+  }
+  function reply(id, result) { send({ jsonrpc: '2.0', id: id, result: result || {} }); }
+  function fail(id, code, message) { send({ jsonrpc: '2.0', id: id, error: { code: code, message: message } }); }
+
+  document.getElementById('tool-line').textContent = 'approve_draft ' + JSON.stringify(data.toolArgs);
+  var firstText = (data.toolResult.content || []).filter(function (c) { return c.type === 'text'; })[0];
+  if (firstText) document.getElementById('assistant-text').textContent = firstText.text.split('\n')[0];
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== frame.contentWindow) return;
+    var msg = event.data;
+    if (!msg || msg.jsonrpc !== '2.0') return;
+    note('←', msg.method || ('result #' + msg.id));
+    if (msg.method === undefined) return;
+    switch (msg.method) {
+      case 'ui/initialize':
+        reply(msg.id, {
+          protocolVersion: (msg.params && msg.params.protocolVersion) || '2026-01-26',
+          hostInfo: { name: 'e2e-harness', version: '1.0.0' },
+          hostCapabilities: { openLinks: {}, serverTools: {}, updateModelContext: { text: {} }, logging: {} },
+          hostContext: { theme: 'light', displayMode: 'inline', availableDisplayModes: ['inline'], platform: 'web', locale: 'en-US' }
+        });
+        break;
+      case 'ui/notifications/initialized':
+        window.__harnessState.initialized = true;
+        send({ jsonrpc: '2.0', method: 'ui/notifications/tool-input', params: { arguments: data.toolArgs } });
+        send({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: data.toolResult });
+        break;
+      case 'ui/notifications/size-changed':
+        if (msg.params && typeof msg.params.height === 'number') frame.style.height = Math.min(Math.max(msg.params.height, 80), 2000) + 'px';
+        break;
+      case 'tools/call':
+        window.__harnessState.toolCalls.push(msg.params && msg.params.name);
+        if (typeof window.e2eCallTool !== 'function') { fail(msg.id, -32603, 'No server connection in this harness.'); break; }
+        window.e2eCallTool(msg.params.name, msg.params.arguments || {}).then(
+          function (result) { reply(msg.id, result); },
+          function (err) { fail(msg.id, -32603, String((err && err.message) || err)); }
+        );
+        break;
+      case 'ui/open-link':
+        window.__harnessState.openedLinks.push(msg.params && msg.params.url);
+        reply(msg.id, {});
+        break;
+      case 'ui/update-model-context':
+        window.__harnessState.modelContext.push(msg.params);
+        reply(msg.id, {});
+        break;
+      default:
+        if (msg.id !== undefined) fail(msg.id, -32601, 'Method not found');
+    }
+  });
+
+  frame.srcdoc = data.cardHtml;
+})();
+</script>
+</body>
+</html>

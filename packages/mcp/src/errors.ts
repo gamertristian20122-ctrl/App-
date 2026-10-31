@@ -111,7 +111,7 @@ function nextStep(err: AppError): string | null {
     case 'forbidden':
       return reason === 'wrong_channel' || reason === 'not_human' ? 'Only the user can approve, in the approval card or the web app.' : null
     case 'payment_required':
-      return 'The user can review their account in the web app.'
+      return 'The user can manage their account and brands in the web app.'
     case 'rate_limited':
     case 'unavailable':
       return 'Try again in a minute.'
@@ -120,16 +120,39 @@ function nextStep(err: AppError): string | null {
   }
 }
 
+/**
+ * The message the model (and the user, through the AI app) sees. Account holds are stated
+ * neutrally: the web app's wording asks people to upgrade or choose a plan, which AI app
+ * directories do not allow inside the conversation (docs/research/mcp.md §6).
+ */
+export function modelMessage(err: AppError): string {
+  if (err.code !== 'payment_required') return err.message
+  const d = err.details ?? {}
+  if (d.reason === 'brand_suspended') return 'This brand is paused because the plan allows fewer brands.'
+  if (d.reason === 'trial_ended') return 'The free trial has ended.'
+  switch (d.status) {
+    case 'past_due':
+      return 'Clipping and rendering are paused because of a payment issue.'
+    case 'canceled':
+      return 'The subscription has ended.'
+    case 'unpaid':
+      return 'The account is on hold for an unpaid invoice.'
+    default:
+      return 'The account has no active plan.'
+  }
+}
+
 /** An AppError as a tool error result. */
 export function appErrorResult(err: AppError): CallToolResult {
   const problems = problemsFromDetails(err.details)
-  const lines = [`${LABEL[err.code]}: ${err.message}`]
+  const message = modelMessage(err)
+  const lines = [`${LABEL[err.code]}: ${message}`]
   if (problems.length > 0) lines.push(...problems.map(problemLine))
   const step = nextStep(err)
   if (step) lines.push(step)
   return fail(lines.join('\n'), {
     code: err.code,
-    message: err.message,
+    message,
     ...safeDetails(err.details),
     ...(problems.length > 0 ? { issues: problems } : {}),
   })

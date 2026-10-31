@@ -61,8 +61,15 @@ describe('periods', () => {
     const sub = { start: d('2026-05-15T10:00:00Z'), end: d('2026-06-15T10:00:00Z') }
     expect(usagePeriod(now, sub)).toEqual(sub)
     expect(usagePeriod(now, null).start.toISOString()).toBe('2026-05-01T00:00:00.000Z')
-    const stale = { start: d('2026-03-15T00:00:00Z'), end: d('2026-04-15T00:00:00Z') }
-    expect(usagePeriod(now, stale).start.toISOString()).toBe('2026-05-01T00:00:00.000Z')
+    // a period that ended (late renewal webhook) rolls forward from its end, same length (review:
+    // the calendar-month fallback opened a second allowance)
+    const stale = { start: d('2026-04-15T00:00:00Z'), end: d('2026-05-15T00:00:00Z') }
+    expect(usagePeriod(now, stale)).toEqual({ start: d('2026-05-15T00:00:00Z'), end: d('2026-06-14T00:00:00Z') })
+    const older = { start: d('2026-03-15T00:00:00Z'), end: d('2026-03-25T00:00:00Z') }
+    expect(usagePeriod(now, older)).toEqual({ start: d('2026-05-14T00:00:00Z'), end: d('2026-05-24T00:00:00Z') })
+    // a period that has not started yet: the calendar month
+    const future = { start: d('2026-06-01T00:00:00Z'), end: d('2026-07-01T00:00:00Z') }
+    expect(usagePeriod(now, future).start.toISOString()).toBe('2026-05-01T00:00:00.000Z')
     expect(usagePeriod(now, { start: null, end: null }).start.toISOString()).toBe('2026-05-01T00:00:00.000Z')
     const inverted = { start: sub.end, end: sub.start }
     expect(usagePeriod(now, inverted).start.toISOString()).toBe('2026-05-01T00:00:00.000Z')

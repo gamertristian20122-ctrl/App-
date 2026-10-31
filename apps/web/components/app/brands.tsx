@@ -40,6 +40,7 @@ export function BrandsView({ data, actions }: { data: BrandsData; actions: Brand
         <Card title="Your plan">
           <Meter
             label="Active brands"
+            kind="slots"
             used={data.activeCount}
             limit={data.limit}
             display={`${data.activeCount} of ${data.limit}`}

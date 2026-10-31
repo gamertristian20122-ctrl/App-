@@ -25,6 +25,8 @@ export interface OAuthCodeRow {
   resource: string | null
   expiresAt: Date
   usedAt: Date | null
+  /** The token family the code was redeemed for (null until redeemed). */
+  familyId: string | null
   createdAt: Date
 }
 
@@ -101,14 +103,28 @@ export async function createCode(db: Db, input: CreateCodeInput): Promise<OAuthC
   return mapCode(row) as OAuthCodeRow
 }
 
-/** Marks an unused, unexpired code used and returns it; null otherwise (single use). */
-export async function consumeCode(db: Db, codeHash: string, now?: Date): Promise<OAuthCodeRow | null> {
+export interface ConsumeCodeBinding {
+  /** Only a code issued to this client is consumed. */
+  clientId: string
+  /** Only a code whose PKCE challenge matches is consumed (the caller hashes the verifier). */
+  codeChallenge: string
+  /** The token family the code is redeemed for (recorded so reuse can revoke it). */
+  familyId: string
+}
+
+/**
+ * Marks an unused, unexpired code used and returns it; null otherwise (single use). With a
+ * binding, only a code for that client and PKCE challenge is consumed, so someone holding just
+ * the code cannot burn it with a wrong verifier.
+ */
+export async function consumeCode(db: Db, codeHash: string, now?: Date, binding?: ConsumeCodeBinding): Promise<OAuthCodeRow | null> {
   return mapCode(
     await db.one(
-      `update public.oauth_codes set used_at = coalesce($2::timestamptz, now())
+      `update public.oauth_codes set used_at = coalesce($2::timestamptz, now()), family_id = coalesce($5::uuid, family_id)
         where code_hash = $1 and used_at is null and expires_at > coalesce($2::timestamptz, now())
+          and ($3::text is null or client_id = $3) and ($4::text is null or code_challenge = $4)
         returning *`,
-      [codeHash, now ?? null],
+      [codeHash, now ?? null, binding?.clientId ?? null, binding?.codeChallenge ?? null, binding?.familyId ?? null],
     ),
   )
 }

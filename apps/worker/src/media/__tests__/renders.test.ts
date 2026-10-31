@@ -107,8 +107,10 @@ describe.skipIf(chromiumIssue !== null)('carousel_render (Chromium)', () => {
     expect(draft.draft).toMatchObject({ status: 'draft', createdVia: 'worker' })
     for (const v of draft.variants) {
       expect(v.mediaIds).toEqual(outcome.mediaIds)
-      expect(v.text).toContain('3 mistakes creators make')
+      // heading and body stay on separate lines (e2e: they used to run together into one sentence)
+      expect(v.text).toBe('3 mistakes creators make\nSwipe to see them all')
     }
+    expect(draft.draft.notes).toBe('Carousel: 3 mistakes creators make Swipe to see them all')
 
     // a retried job overwrites the same objects and reuses the draft
     const again = (await createCarouselRender()(queued!, h.context)) as { mediaIds: string[]; draftId: string }

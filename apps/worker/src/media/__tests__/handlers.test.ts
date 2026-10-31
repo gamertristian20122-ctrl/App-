@@ -240,7 +240,12 @@ describe('transcribe', () => {
     expect(fake.calls[0]?.filePath).toMatch(/audio\.mp3$/)
     expect(fake.calls[0]?.language).toBe('en')
     const row = await h.services.transcripts.getRow(t.userId, media.id)
-    expect(row?.words.length).toBeGreaterThan(10)
+    expect(row?.words.length).toBeGreaterThan(5)
+    // the fake's fixture monologue is longer than the test video: nothing is kept past its end
+    const durationMs = (await h.services.media.get(t.userId, media.id)).durationMs ?? 0
+    expect(durationMs).toBeGreaterThan(0)
+    expect(row?.durationMs).toBeLessThanOrEqual(durationMs)
+    expect(row?.words.every((w) => w.e <= durationMs)).toBe(true)
     const balance = await usage(t.userId)
     expect(balance.settled).toBe(reserved)
     expect(balance.reserved).toBe(0)

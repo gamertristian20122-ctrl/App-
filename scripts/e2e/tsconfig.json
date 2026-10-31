@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "baseUrl": ".",
+    "paths": {
+      "@modelcontextprotocol/sdk/*": ["../../apps/web/node_modules/@modelcontextprotocol/sdk/dist/esm/*"],
+      "playwright-core": ["../../apps/worker/node_modules/playwright-core"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

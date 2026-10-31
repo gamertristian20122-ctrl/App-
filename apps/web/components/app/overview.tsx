@@ -26,6 +26,7 @@ export function UsageMeters({ data }: { data: Pick<OverviewData, 'clip' | 'brand
       />
       <Meter
         label="Brands"
+        kind="slots"
         used={data.brandsActive}
         limit={data.brandsLimit}
         display={`${data.brandsActive} of ${data.brandsLimit}`}

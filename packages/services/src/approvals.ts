@@ -17,7 +17,7 @@ import { z } from 'zod'
 import { AppError } from '@app/core/errors'
 import { randomToken, sha256Hex } from '@app/core/crypto'
 import { PlatformSchema, type Actor } from '@app/core/types'
-import { IdSchema, lineSchema, textSchema, MAX_POST_TEXT, MAX_TITLE } from '@app/core/validation'
+import { EMPTY_EDIT_MESSAGE, IdSchema, lineSchema, textSchema, MAX_POST_TEXT, MAX_TITLE, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
 import type { ApprovalNonceChannel, ApprovalNonceRow, BoundRepos, DraftRow } from '@app/db'
 import { auditIn } from './audit'
 import { conflict, fromZod, id, notFound, requireDraft, requireUser, userIdOf, validation, withErrors, type Ctx } from './context'
@@ -79,8 +79,9 @@ const NonceEditSchema = z
     platform: PlatformSchema,
     text: textSchema(MAX_POST_TEXT).optional(),
     title: lineSchema(0, MAX_TITLE).optional(),
+    privacyLevel: z.enum(TIKTOK_PRIVACY_LEVELS).optional(),
   })
-  .refine((v) => v.text !== undefined || v.title !== undefined, 'Change the text or the title.')
+  .refine((v) => v.text !== undefined || v.title !== undefined || v.privacyLevel !== undefined, EMPTY_EDIT_MESSAGE)
 
 const MESSAGES: Record<NonceProblem, string> = {
   invalid: 'This approval link is not valid. Open the draft again to review it.',
@@ -280,6 +281,7 @@ export function createApprovalsService(ctx: Ctx, deps: { drafts: DraftsService }
           platform: data.platform,
           ...(data.text !== undefined ? { text: data.text } : {}),
           ...(data.title !== undefined ? { title: data.title } : {}),
+          ...(data.privacyLevel !== undefined ? { privacyLevel: data.privacyLevel } : {}),
         },
         { via },
       )

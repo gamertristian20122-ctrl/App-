@@ -13,6 +13,25 @@ import { clipReserveKey, releaseIn, settleIn } from './usage'
 
 export type TranscriptStatus = 'ready' | 'processing' | 'failed' | 'not_a_source'
 
+type TranscriptResultData = ReturnType<typeof TranscriptResultSchema.parse>
+
+/**
+ * Keeps a transcript inside its source: nothing may start at or after the end of the video, and
+ * nothing may end after it. Engines pad the last segment, and an engine that does not read the
+ * file (the fake transcriber in local runs) can return far more than the video holds; get_transcript
+ * would then offer moments make_clips must refuse.
+ */
+export function clampTranscript(result: TranscriptResultData, sourceDurationMs: number | null): TranscriptResultData {
+  if (!sourceDurationMs || sourceDurationMs <= 0) return result
+  const end = sourceDurationMs
+  const inside = (items: readonly TimedText[]) => items.filter((w) => w.s < end).map((w) => (w.e > end ? { ...w, e: end } : w))
+  const words = inside(result.words)
+  const segments = inside(result.segments)
+  const dropped = words.length < result.words.length || segments.length < result.segments.length
+  const text = !dropped ? result.text : (segments.length > 0 ? segments : words).map((w) => w.t.trim()).filter(Boolean).join(' ')
+  return { ...result, durationMs: Math.min(result.durationMs, end), words, segments, text }
+}
+
 export interface TranscriptMatch {
   /** Segment containing the match. */
   startMs: number
@@ -133,10 +152,11 @@ export function createTranscriptsService(ctx: Ctx) {
       const uid = userIdOf(userId)
       const engine = TRANSCRIPT_ENGINES.find((e) => e === input.engine)
       if (!engine) throw validation('Unknown transcription engine.')
-      const result = fromZod(TranscriptResultSchema, input.result, 'Transcript')
+      const parsed = fromZod(TranscriptResultSchema, input.result, 'Transcript')
       const media = await requireMedia(ctx.repos, uid, mediaId)
       if (!isClipSource(media)) throw validation('Only clip sources are transcribed.')
       if (media.status !== 'ready') throw conflict('The video is not ready.')
+      const result = clampTranscript(parsed, media.durationMs)
       return ctx.tx(async (r) => {
         const row = await r.transcripts.save(uid, {
           mediaId: media.id,

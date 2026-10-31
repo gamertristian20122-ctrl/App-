@@ -405,3 +405,114 @@ describe('render_carousel / render_video', () => {
     await o.close()
   })
 })
+
+describe('review: tool paths to the playbook (the model cannot call prompts/get)', () => {
+  /** A transcribed 2-hour source with 6-second segments (the reviewer's measurement). */
+  async function longSource(userId: string, brandId: string) {
+    const { media } = await h.services.media.registerDriveLink(userId, { brandId, url: 'https://drive.google.com/file/d/long/view', rightsAttested: true })
+    await h.services.media.markIngested(userId, media.id, { durationMs: 7_200_000 })
+    const segments = Array.from({ length: 1_200 }, (_, i) => ({ s: i * 6_000, e: (i + 1) * 6_000, t: `Segment ${i} says something worth hearing about the topic at hand, at some length.` }))
+    const words = segments.flatMap((seg) => seg.t.split(' ').map((t, j) => ({ s: seg.s + j * 400, e: seg.s + (j + 1) * 400, t })))
+    await h.services.transcripts.save(userId, media.id, {
+      engine: 'fake',
+      result: { language: 'en', durationMs: 7_200_000, text: segments.map((s) => s.t).join(' '), words, segments },
+    })
+    return media
+  }
+
+  it('get_transcript pages a long transcript within a budget, structuredContent included (was 150k + 135k characters)', async () => {
+    const { userId, brandId } = await tenant(h)
+    const media = await longSource(userId, brandId)
+    const c = await connect(h, userId)
+    const first = await c.call('get_transcript', { mediaId: media.id })
+    const t = expectOk(first)
+    expect(t.length).toBeLessThan(45_000)
+    expect(JSON.stringify(first.structuredContent).length).toBeLessThan(80_000)
+    const s = structured<{ transcript: { segments: Array<{ s: number }>; nextStartMs: number | null; words?: unknown } }>(first).transcript
+    expect(s.words).toBeUndefined()
+    expect(s.nextStartMs).toBeGreaterThan(0)
+    expect(s.segments.at(-1)?.s).toBeLessThan(s.nextStartMs ?? 0)
+    expect(t).toContain(`startMs: ${s.nextStartMs}`)
+    expect(t).toMatch(/What makes a good clip/) // the pick_clips rules reach the model
+    const next = structured<{ transcript: { segments: Array<{ s: number }> } }>(await c.call('get_transcript', { mediaId: media.id, startMs: s.nextStartMs }))
+    expect(next.transcript.segments[0]?.s).toBe(s.nextStartMs)
+    await c.close()
+  })
+
+  it('a short range prints word timings in the text (structuredContent is not in the model context)', async () => {
+    const { userId, brandId } = await tenant(h)
+    const media = await transcribedSource(h, userId, brandId)
+    const c = await connect(h, userId)
+    const ranged = await c.call('get_transcript', { mediaId: media.id, startMs: 30_000, endMs: 60_000 })
+    const t = expectOk(ranged)
+    expect(t).toMatch(/Word timings \(word@startMs\)/)
+    expect(t).toMatch(/hook@\d+/)
+    expect(structured<{ transcript: { words: unknown[] } }>(ranged).transcript.words.length).toBeGreaterThan(0)
+    // a long range: no word timings, and the text says how to get them
+    const wide = await c.call('get_transcript', { mediaId: media.id, startMs: 0, endMs: 600_000 })
+    expect(text(wide)).toMatch(/range of 5 minutes or less/)
+    expect(structured<{ transcript: { words?: unknown } }>(wide).transcript.words).toBeUndefined()
+    await c.close()
+  })
+
+  it('get_transcript without arguments lists images and audio with ids too (review: no way to find them)', async () => {
+    const { userId, brandId } = await tenant(h)
+    const img = await image(h, userId, brandId)
+    const audio = await h.r.media.create(userId, { brandId, kind: 'audio', origin: 'upload', status: 'ready', storageKey: `users/${userId}/uploads/a.mp3`, mimeType: 'audio/mpeg', bytes: 10, durationMs: 30_000 })
+    const c = await connect(h, userId)
+    const listed = await c.call('get_transcript', {})
+    const t = expectOk(listed)
+    expect(t).toContain(img.id)
+    expect(t).toContain(audio.id)
+    expect(t).toMatch(/render_carousel/)
+    const s = structured<{ images: Array<{ id: string }>; audio: Array<{ id: string }> }>(listed)
+    expect(s.images.map((m) => m.id)).toEqual([img.id])
+    expect(s.audio.map((m) => m.id)).toEqual([audio.id])
+    await c.close()
+  })
+
+  it('list_accounts with a brandId returns the writing brief and the full voice profile to merge into', async () => {
+    const { userId, brandId } = await tenant(h, { platforms: ['linkedin'] })
+    await h.services.voice.save(userId, { brandId, profile: { tone: 'Warm and direct', audience: 'Cafe owners', do: ['Use short sentences'] } })
+    const c = await connect(h, userId)
+    const res = await c.call('list_accounts', { brandId })
+    const t = expectOk(res)
+    expect(t).toMatch(/Tone: Warm and direct/)
+    expect(t).toMatch(/Audience: Cafe owners/)
+    expect(t).toMatch(/LinkedIn: text ≤/)
+    expect(t).toMatch(/replaces the whole profile/)
+    expect(structured<{ voiceProfile: { version: number; profile: { do: string[] } } }>(res).voiceProfile).toMatchObject({ version: 1, profile: { do: ['Use short sentences'] } })
+    // the tool descriptions and instructions point at tools, not at prompts the model cannot load
+    const { tools } = await c.client.listTools()
+    for (const tool of tools) expect(tool.description, tool.name).not.toMatch(/load the write_post prompt|use the (pick_clips|weekly_review) prompt/i)
+    expect(c.client.getInstructions()).not.toMatch(/use the write_post prompt|pick_clips prompt →|weekly_review prompt for/)
+    await c.close()
+  })
+
+  it('get_analytics with a brandId adds the week-over-week review and the steps', async () => {
+    const { userId, brandId } = await tenant(h)
+    const c = await connect(h, userId)
+    const res = await c.call('get_analytics', { brandId })
+    const t = expectOk(res)
+    expect(t).toMatch(/Last 7 days .* vs the previous 7 days/)
+    expect(t).toMatch(/Propose exactly 3 concrete experiments/)
+    expect(structured<{ weeklyReview: unknown }>(res).weeklyReview).toBeDefined()
+    expect(text(await c.call('get_analytics', {}))).toMatch(/call get_analytics with its brandId/)
+    await c.close()
+  })
+
+  it('account holds are worded neutrally in tool errors (no upgrade prompt; review: app guidelines)', async () => {
+    const { userId, brandId } = await tenant(h)
+    await h.r.brands.setStatus(userId, brandId, 'suspended')
+    const c = await connect(h, userId)
+    const t = expectToolError(await c.call('create_draft', { brandId, variants: [{ platform: 'instagram', text: 'hi' }] }), 'payment_required')
+    expect(t).toMatch(/paused because the plan allows fewer brands/)
+    expect(t).not.toMatch(/Upgrade|Choose a plan/i)
+    await h.r.brands.setStatus(userId, brandId, 'active')
+    await h.r.users.updateBilling(userId, { subscriptionStatus: 'canceled' })
+    const held = expectToolError(await c.call('create_draft', { brandId, variants: [{ platform: 'instagram', text: 'hi' }] }), 'payment_required')
+    expect(held).toMatch(/The subscription has ended/)
+    expect(held).not.toMatch(/Choose a plan|Upgrade/i)
+    await c.close()
+  })
+})

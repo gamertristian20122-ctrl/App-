@@ -1,10 +1,10 @@
-// middleware.ts: Supabase session refresh on navigations, security headers on the consent and
+// proxy.ts (formerly middleware.ts): Supabase session refresh on navigations, security headers on the consent and
 // approval pages, and machine endpoints (/api/mcp, /oauth/token, webhooks) left untouched.
 
 import { NextRequest } from 'next/server'
 import { describe, expect, it, vi } from 'vitest'
 import { handleEdgeRequest, shouldSkip } from '@/lib/server/edge-session'
-import { config as middlewareConfig } from '@/middleware'
+import { config as middlewareConfig } from '@/proxy'
 
 const SUPABASE_URL = 'https://proj.supabase.co'
 const deps = (fetch: typeof globalThis.fetch) => ({ supabaseUrl: SUPABASE_URL, supabaseAnonKey: 'anon-key', fetch })

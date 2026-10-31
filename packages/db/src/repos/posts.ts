@@ -1,4 +1,4 @@
-import type { Platform, PostStatus } from '@app/core/types'
+import type { Actor, Platform, PostStatus } from '@app/core/types'
 import { camelRow, camelRows, clampLimit, many, truncate } from '../sql'
 import type { Db } from '../types'
 
@@ -21,6 +21,8 @@ export interface PostRow {
   attempts: number
   publishedAt: Date | null
   canceledAt: Date | null
+  /** Who canceled it: 'web' = the person (withdraws the approval); null = the system. */
+  canceledBy: Actor | null
   createdAt: Date
   updatedAt: Date
 }
@@ -146,14 +148,17 @@ export async function reschedule(db: Db, userId: string, postId: string, schedul
   )
 }
 
-/** Cancels a scheduled or failed post. Returns null if it is publishing or done. */
-export async function cancel(db: Db, userId: string, postId: string, reason?: string | null): Promise<PostRow | null> {
+/**
+ * Cancels a scheduled or failed post. Returns null if it is publishing or done. `canceledBy` is
+ * the actor when a person (or the AI) canceled it; system cancels leave it null.
+ */
+export async function cancel(db: Db, userId: string, postId: string, reason?: string | null, canceledBy: Actor | null = null): Promise<PostRow | null> {
   return map(
     await db.one(
-      `update public.posts set status = 'canceled', canceled_at = now(), error = coalesce($3, error)
+      `update public.posts set status = 'canceled', canceled_at = now(), error = coalesce($3, error), canceled_by = $4::public.actor
         where id = $1 and user_id = $2 and status in ('scheduled', 'failed')
         returning *`,
-      [postId, userId, truncate(reason, 4000)],
+      [postId, userId, truncate(reason, 4000), canceledBy],
     ),
   )
 }

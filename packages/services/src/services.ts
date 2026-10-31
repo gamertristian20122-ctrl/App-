@@ -27,13 +27,14 @@ export function createServices(deps: ServicesDeps) {
   const approvals = createApprovalsService(ctx, { drafts: draftsCore })
   const accounts = createAccountsService(ctx)
   const posts = createPostsService(ctx)
+  const clips = createClipsService(ctx)
   return {
     users: createUsersService(ctx),
     brands: createBrandsService(ctx),
     accounts,
     media: createMediaService(ctx),
     transcripts: createTranscriptsService(ctx),
-    clips: createClipsService(ctx),
+    clips,
     /** drafts.approve is approvals.approve (a valid one-time nonce is always required). */
     drafts: { ...draftsCore, approve: approvals.approve },
     approvals,
@@ -49,7 +50,7 @@ export function createServices(deps: ServicesDeps) {
     oauth: createOAuthService(ctx),
     audit: createAuditService(ctx),
     /** System-level: cleanup job, webhook lookups (not user-scoped). */
-    maintenance: createMaintenanceService(ctx, { accounts, posts }),
+    maintenance: createMaintenanceService(ctx, { accounts, posts, clips }),
     /** The dependencies the services were built with (worker convenience). */
     deps: { db: ctx.db, provider: ctx.provider, storage: ctx.storage, clock: ctx.clock, config: ctx.config, log: ctx.log },
   }

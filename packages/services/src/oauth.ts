@@ -412,21 +412,41 @@ export function createOAuthService(ctx: Ctx) {
         const verifier = VerifierSchema.safeParse(q.code_verifier)
         if (!code.success) throw oauthError('invalid_grant', 'The authorization code is invalid or expired.')
         if (!verifier.success) throw oauthError('invalid_request', 'A valid code_verifier is required.')
-        const row = await ctx.repos.oauth.consumeCode(sha256Hex(code.data), now)
-        if (!row) throw oauthError('invalid_grant', 'The authorization code is invalid, expired or already used.')
-        if (row.clientId !== client.clientId) throw oauthError('invalid_grant', 'The authorization code was issued to another client.')
+        const codeHash = sha256Hex(code.data)
+        const invalid = () => oauthError('invalid_grant', 'The authorization code is invalid, expired or already used.')
+        // Check everything before the code is used up, so someone holding only the code cannot
+        // burn it with a wrong client or verifier.
+        const found = await ctx.repos.oauth.getCode(codeHash)
+        if (!found) throw invalid()
+        if (found.usedAt !== null) {
+          // A second redemption (OAuth 2.1 §4.1.3): revoke what the first one issued.
+          if (found.familyId) await ctx.repos.oauth.revokeFamily(found.familyId, now)
+          ctx.log.warn('oauth authorization code reuse: tokens revoked', { clientId: found.clientId })
+          throw invalid()
+        }
+        if (found.expiresAt.getTime() <= now.getTime()) throw invalid()
+        if (found.clientId !== client.clientId) throw oauthError('invalid_grant', 'The authorization code was issued to another client.')
         // PKCE binds the code to this client; when redirect_uri is sent it must be the exact one used.
-        if (q.redirect_uri !== undefined && q.redirect_uri !== row.redirectUri) {
+        if (q.redirect_uri !== undefined && q.redirect_uri !== found.redirectUri) {
           throw oauthError('invalid_grant', 'redirect_uri does not match the authorization request.')
         }
-        if (!safeEqual(pkceChallenge(verifier.data), row.codeChallenge)) {
+        const challenge = pkceChallenge(verifier.data)
+        if (!safeEqual(challenge, found.codeChallenge)) {
           throw oauthError('invalid_grant', 'The code_verifier does not match the code_challenge.')
         }
-        const resource = row.resource ?? audience
+        const resource = found.resource ?? audience
         if (q.resource !== undefined && q.resource.trim() !== '' && normalizeResource(q.resource) !== resource) {
           throw oauthError('invalid_target', 'The resource does not match the authorization request.')
         }
-        return issuePair({ clientId: client.clientId, userId: row.userId, scope: row.scope, resource, familyId: randomUUID() })
+        const familyId = randomUUID()
+        const row = await ctx.repos.oauth.consumeCode(codeHash, now, { clientId: client.clientId, codeChallenge: challenge, familyId })
+        if (!row) {
+          // lost a race with another redemption of the same code: treat it as reuse
+          const again = await ctx.repos.oauth.getCode(codeHash)
+          if (again?.familyId) await ctx.repos.oauth.revokeFamily(again.familyId, now)
+          throw invalid()
+        }
+        return issuePair({ clientId: client.clientId, userId: row.userId, scope: row.scope, resource, familyId })
       }
 
       if (q.grant_type === 'refresh_token') {

@@ -1,9 +1,10 @@
 // Voice and analytics: import_past_posts, save_voice_profile, get_analytics.
 
-import { PLATFORM_LABELS, type Metrics } from '@app/core/types'
+import { PLATFORM_LABELS } from '@app/core/types'
 import { GetAnalyticsInputSchema, ImportPastPostsInputSchema, SaveVoiceProfileInputSchema } from '@app/core/validation'
-import type { BrandAnalytics, FollowerChange } from '@app/services'
+import type { BrandAnalytics } from '@app/services'
 import { excerpt, listText, ok, plural } from '../results'
+import { metricsText, followersText, WEEKLY_REVIEW_STEPS, weeklyReviewText } from '../playbook'
 import { jobViewForModel } from '../views'
 import { READ_ONLY, type ToolDef } from './types'
 
@@ -12,7 +13,7 @@ export const importPastPosts: ToolDef = {
   title: 'Import past posts',
   description:
     'Imports the brand\'s recent posts (captions and metrics) from its connected accounts in the background. ' +
-    'They become voice samples for the write_post prompt and context for weekly_review. Repeating within an hour does nothing new.',
+    'They become voice samples (list_accounts with the brandId shows the best ones) and the baseline for get_analytics. Repeating within an hour does nothing new.',
   input: ImportPastPostsInputSchema,
   describe: {
     brandId: 'The brand id (from list_accounts).',
@@ -27,7 +28,7 @@ export const importPastPosts: ToolDef = {
     }
     return ok(
       `Importing past posts from ${listText(result.platforms.map((p) => PLATFORM_LABELS[p]))} in the background (${plural(result.jobs.length, 'job')}: ${result.jobs.map((j) => j.id).join(', ')}). ` +
-        'Check with post_status (jobId). Imported posts feed the write_post prompt and weekly_review.',
+        'Check with post_status (jobId). Imported posts become voice samples (list_accounts with the brandId) and the analytics baseline.',
       { platforms: result.platforms, jobs: result.jobs.map(jobViewForModel) },
     )
   },
@@ -38,7 +39,7 @@ export const saveVoiceProfile: ToolDef = {
   title: 'Save the brand voice profile',
   description:
     'Saves a new version of the brand\'s voice profile (tone, audience, vocabulary, do and don\'t rules, emoji and hashtag policy, sample posts). ' +
-    'It replaces the active profile (older versions are kept). Build it from the user\'s answers and imported posts; the write_post prompt loads it.',
+    'It replaces the WHOLE active profile (older versions are kept): to change or add one rule, first read the current profile with list_accounts { brandId } and send it complete with your change. Build it from the user\'s answers and imported posts.',
   input: SaveVoiceProfileInputSchema,
   describe: {
     brandId: 'The brand id (from list_accounts).',
@@ -49,24 +50,10 @@ export const saveVoiceProfile: ToolDef = {
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   async run(ctx, args) {
     const view = await ctx.services.voice.save(ctx.userId, args, { via: 'mcp' })
-    return ok(`Saved voice profile version ${view.version} for brand ${view.brandId}. The write_post prompt now uses it.`, {
+    return ok(`Saved voice profile version ${view.version} for brand ${view.brandId}. list_accounts { brandId } and the write_post prompt now use it.`, {
       voiceProfile: { brandId: view.brandId, version: view.version, source: view.source, profile: view.profile, createdAt: view.createdAt },
     })
   },
-}
-
-const METRIC_ORDER: readonly (keyof Metrics)[] = ['views', 'impressions', 'reach', 'likes', 'comments', 'shares', 'saves']
-
-export function metricsText(m: Metrics): string {
-  const parts = METRIC_ORDER.filter((k) => typeof m[k] === 'number').map((k) => `${k} ${(m[k] as number).toLocaleString('en-US')}`)
-  return parts.length > 0 ? parts.join(', ') : 'no metrics yet'
-}
-
-export function followersText(f: readonly FollowerChange[]): string {
-  const parts = f
-    .filter((x) => x.followers !== null)
-    .map((x) => `${PLATFORM_LABELS[x.platform]} ${x.followers?.toLocaleString('en-US')}${x.change !== null ? ` (${x.change >= 0 ? '+' : ''}${x.change})` : ''}`)
-  return parts.length > 0 ? parts.join(', ') : 'no follower data yet'
 }
 
 function brandText(a: BrandAnalytics, days: number): string {
@@ -88,7 +75,7 @@ export const getAnalytics: ToolDef = {
   title: 'Get analytics',
   description:
     'Summarises published-post metrics (views, likes, comments, shares, saves) and follower counts per brand over the last N days (default 7), with the top posts. ' +
-    'Use the weekly_review prompt for a week-over-week review with experiments.',
+    'With a brandId (and the default 7 days) it adds the weekly review: the last 7 days against the previous 7, top and weakest posts, posting cadence and the pipeline, with the steps for proposing experiments.',
   input: GetAnalyticsInputSchema,
   describe: {
     brandId: 'Only this brand (default: every active brand).',
@@ -100,6 +87,14 @@ export const getAnalytics: ToolDef = {
     const summaries = await ctx.services.analytics.summary(ctx.userId, args)
     const days = typeof args.days === 'number' ? args.days : 7
     if (summaries.length === 0) return ok('No active brands to report on.', { brands: [] })
-    return ok(summaries.map((s) => brandText(s, days)).join('\n\n'), { days, brands: summaries })
+    const text = summaries.map((s) => brandText(s, days)).join('\n\n')
+    // the weekly review (week over week) for one brand: the model cannot load the weekly_review prompt
+    if (typeof args.brandId === 'string' && days === 7 && args.platform === undefined) {
+      const review = await ctx.services.analytics.weeklyReview(ctx.userId, args.brandId)
+      return ok([text, '', weeklyReviewText(review), '', ...WEEKLY_REVIEW_STEPS].join('\n'), { days, brands: summaries, weeklyReview: review })
+    }
+    return ok(`${text}\n\nFor a week-over-week review of one brand, call get_analytics with its brandId.`, { days, brands: summaries })
   },
 }
+
+export { followersText, metricsText } from '../playbook'

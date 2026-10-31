@@ -111,7 +111,7 @@ describe('AccountsView', () => {
 describe('MediaView', () => {
   it('shows the upload form with the rights checkbox, allowed drive hosts and the YouTube refusal', async () => {
     const t = await h.tenant({ platforms: [] })
-    await h.image(t.userId, t.brandId)
+    const imageId = await h.image(t.userId, t.brandId)
     const page = await loadMedia(h.services, t.userId)
     const html = decode(
       renderToStaticMarkup(
@@ -124,6 +124,9 @@ describe('MediaView', () => {
     expect(html).toContain(SOURCE_URL_MESSAGES.video_site_forbidden)
     expect(html).toContain('Image')
     expect(html).toContain('/api/dev-storage/')
+    // review: the AI needs media ids for images and audio; the page shows them to copy
+    expect(html).toContain('Media id (for your AI assistant)')
+    expect(html).toContain(String(imageId))
   })
 })
 

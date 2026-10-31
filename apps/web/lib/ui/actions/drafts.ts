@@ -4,6 +4,7 @@
 // posts. Each function takes the services and the signed-in user's id, reads the form, calls one
 // service function and returns a short result. Server-only.
 
+import { EMPTY_EDIT_MESSAGE, TIKTOK_PRIVACY_LEVELS, type TikTokPrivacyLevel } from '@app/core/validation'
 import type { Services } from '@app/services'
 import { failed, failure, success, type ActionResult } from '../action-result'
 import { checkbox, id, platform, text, timeZone, type Fields } from '../form'
@@ -44,7 +45,17 @@ export async function rejectDraft(services: Services, userId: string, fd: Fields
   }
 }
 
-/** Edits one variant's text/title (the card nonce must still be valid; the edit needs a new approval). */
+/** A TikTok privacy level from the form: undefined when absent, null when not a known level. */
+export function privacyLevelOf(fd: Fields): TikTokPrivacyLevel | null | undefined {
+  const raw = fd.get('privacyLevel')
+  if (raw === null) return undefined
+  return typeof raw === 'string' && (TIKTOK_PRIVACY_LEVELS as readonly string[]).includes(raw) ? (raw as TikTokPrivacyLevel) : null
+}
+
+/**
+ * Edits one variant's text/title, or TikTok's "who can see this post" (the card nonce must still
+ * be valid; the edit needs a new approval).
+ */
 export async function editVariant(services: Services, userId: string, fd: Fields): Promise<ActionResult> {
   const draftId = id(fd, 'draftId')
   const nonce = nonceOf(fd)
@@ -52,7 +63,9 @@ export async function editVariant(services: Services, userId: string, fd: Fields
   if (!draftId || !nonce || !p) return failed(MISSING)
   const body = text(fd, 'text', { max: 70_000, trim: false })
   const title = fd.get('title') === null ? undefined : text(fd, 'title', { max: 1_000 })
-  if (body === undefined && title === undefined) return failed('Change the text or the title.')
+  const privacyLevel = privacyLevelOf(fd)
+  if (privacyLevel === null) return failed('Choose who can see the TikTok post.')
+  if (body === undefined && title === undefined && privacyLevel === undefined) return failed(EMPTY_EDIT_MESSAGE)
   try {
     await services.approvals.editVariant(
       userId,
@@ -62,9 +75,11 @@ export async function editVariant(services: Services, userId: string, fd: Fields
         platform: p,
         ...(body !== undefined ? { text: body.replace(/\s+$/, '') } : {}),
         ...(title !== undefined ? { title } : {}),
+        ...(privacyLevel !== undefined ? { privacyLevel } : {}),
       },
       { via: 'web' },
     )
+    if (body === undefined && title === undefined) return success('Saved who can see the TikTok post. Approve when you are ready.')
     return success('Saved. Review the change, then approve.')
   } catch (error) {
     return failure(error)

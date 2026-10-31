@@ -4,6 +4,7 @@
 // signed-in user is the only principal (another user's nonce is simply "not valid"). Server-only.
 
 import { isAppError } from '@app/core/errors'
+import { TIKTOK_PRIVACY_LEVELS, type TikTokPrivacyLevel } from '@app/core/validation'
 import type { DraftPreview, NonceProblem, Services } from '@app/services'
 
 const NONCE_RE = /^[A-Za-z0-9_-]{22,200}$/
@@ -65,6 +66,33 @@ export async function decideApproval(
       const issues = Array.isArray(error.details?.problems) ? (error.details.problems as unknown[]).filter((p): p is string => typeof p === 'string') : undefined
       return { ok: false, message: error.message, ...(issues && issues.length > 0 ? { issues } : {}) }
     }
+    throw error
+  }
+}
+
+export type PrivacyResult = { ok: true; nonce: string } | { ok: false; message: string }
+
+/**
+ * Sets who can see the draft's TikTok post (TikTok requires the person to choose; drafts made
+ * from clips and renders arrive without it). The edit uses up this nonce and returns the next one
+ * for the same page; the draft id again comes from the nonce.
+ */
+export async function setTikTokPrivacy(services: Services, userId: string, nonce: string, privacyLevel: unknown): Promise<PrivacyResult> {
+  if (!NONCE_RE.test(nonce)) return { ok: false, message: PROBLEM_MESSAGES.invalid }
+  if (typeof privacyLevel !== 'string' || !(TIKTOK_PRIVACY_LEVELS as readonly string[]).includes(privacyLevel)) {
+    return { ok: false, message: 'Choose who can see the TikTok post.' }
+  }
+  const check = await services.approvals.verifyNonce(userId, nonce, undefined, { via: 'web' })
+  if (!check.valid || !check.draftId) return { ok: false, message: PROBLEM_MESSAGES[check.reason ?? 'invalid'] }
+  try {
+    const result = await services.approvals.editVariant(
+      userId,
+      { draftId: check.draftId, nonce, platform: 'tiktok', privacyLevel: privacyLevel as TikTokPrivacyLevel },
+      { via: 'web' },
+    )
+    return { ok: true, nonce: result.nonce.nonce }
+  } catch (error) {
+    if (isAppError(error)) return { ok: false, message: error.message }
     throw error
   }
 }

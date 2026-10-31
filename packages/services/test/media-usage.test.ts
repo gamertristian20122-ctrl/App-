@@ -126,9 +126,29 @@ describe('media.registerDriveLink', () => {
     const row = await h.s.media.getForWorker(userId, res.media.id)
     expect(row.sourceUrl).toContain('drive.google.com')
     expect(await h.s.jobs.listForUser(userId, { type: 'source_ingest' })).toHaveLength(1)
+    const second = await tenant(h)
     for (const url of ['https://www.dropbox.com/s/x/v.mp4?dl=0', 'https://1drv.ms/v/s!abc', 'https://onedrive.live.com/?id=1']) {
-      await h.s.media.registerDriveLink(userId, { url, rightsAttested: true })
+      await h.s.media.registerDriveLink(second.userId, { url, rightsAttested: true })
     }
+  })
+
+  it('refuses links before any download when no clipping time or storage is left, or too many are pending (review)', async () => {
+    const { userId } = await tenant(h) // starter: 4 h, 50 GB
+    // three pending at most
+    for (let i = 0; i < 3; i++) await h.s.media.registerDriveLink(userId, { url: `https://drive.google.com/file/d/${i}/view`, rightsAttested: true })
+    const busy = await expectAppError(h.s.media.registerDriveLink(userId, { url: 'https://drive.google.com/file/d/9/view', rightsAttested: true }), 'limit_exceeded', /still being downloaded/)
+    expect(busy.details).toMatchObject({ pending: 3, limit: 3 })
+
+    const noTime = await tenant(h)
+    await h.s.usage.reserve(noTime.userId, { meter: 'clip_seconds', amount: 14_400, idempotencyKey: 'manual:all' })
+    const err = await expectAppError(h.s.media.registerDriveLink(noTime.userId, { url: 'https://drive.google.com/file/d/1/view', rightsAttested: true }), 'limit_exceeded', /No clipping time/)
+    expect(err.details).toMatchObject({ meter: 'clip_seconds', remaining: 0 })
+
+    const full = await tenant(h)
+    await h.r.media.create(full.userId, { kind: 'video', origin: 'upload', status: 'ready', storageKey: `users/${full.userId}/uploads/big.mp4`, bytes: 50_000_000_000 })
+    await expectAppError(h.s.media.registerDriveLink(full.userId, { url: 'https://drive.google.com/file/d/1/view', rightsAttested: true }), 'limit_exceeded', /storage is full/)
+    expect(await h.s.jobs.listForUser(noTime.userId, { type: 'source_ingest' })).toHaveLength(0)
+    expect(await h.s.jobs.listForUser(full.userId, { type: 'source_ingest' })).toHaveLength(0)
   })
 
   it('refuses YouTube and every other host, and http', async () => {
@@ -195,6 +215,32 @@ describe('media.markIngested + usage metering', () => {
     expect(err.details).toMatchObject({ remaining: 3_600, requested: 7_200, limit: 14_400 })
   })
 
+  it('re-checks storage with the real size and deletes the file of a refused or failed source (review)', async () => {
+    const { userId } = await tenant(h)
+    await h.r.media.create(userId, { kind: 'video', origin: 'upload', status: 'ready', storageKey: `users/${userId}/uploads/big.mp4`, bytes: 45_000_000_000 })
+    const media = await source(userId)
+    await h.storage.putBytes(media.storageKey, new Uint8Array([1, 2, 3]), 'video/mp4')
+    const res = await h.s.media.markIngested(userId, media.id, { durationMs: 60_000, bytes: 10_000_000_000 })
+    expect(res.error).toMatch(/storage is full/)
+    expect(res.media.status).toBe('failed')
+    expect(await h.storage.head(media.storageKey)).toBeNull()
+    expect((await h.s.usage.balance(userId)).used).toBe(0)
+
+    // refused for clipping time: the file goes too
+    const other = await tenant(h)
+    await h.s.usage.reserve(other.userId, { meter: 'clip_seconds', amount: 14_000, idempotencyKey: 'manual:most' })
+    const m2 = await source(other.userId)
+    await h.storage.putBytes(m2.storageKey, new Uint8Array([1]), 'video/mp4')
+    expect((await h.s.media.markIngested(other.userId, m2.id, { durationMs: 3_600_000, bytes: MB })).error).toMatch(/Not enough clipping time/)
+    expect(await h.storage.head(m2.storageKey)).toBeNull()
+
+    // the worker gave up: markFailed deletes the stored file as well
+    const m3 = await source(other.userId)
+    await h.storage.putBytes(m3.storageKey, new Uint8Array([1]), 'video/mp4')
+    expect((await h.s.media.markFailed(other.userId, m3.id, new Error('unreadable'))).status).toBe('failed')
+    expect(await h.storage.head(m3.storageKey)).toBeNull()
+  })
+
   it('refuses sources over 4 hours', async () => {
     const { userId } = await tenant(h)
     const media = await source(userId)
@@ -257,6 +303,27 @@ describe('media.markIngested + usage metering', () => {
     expect((await h.s.usage.balance(user.id)).used).toBe(0)
     const noSub = await createTestUser(h.db)
     expect((await h.s.usage.balance(noSub.id)).period.start.toISOString()).toBe('2026-11-01T00:00:00.000Z')
+  })
+
+  it('an in-app trial meters over the trial, so crossing the 1st gives no second hour (review)', async () => {
+    h.clock.set('2026-10-28T12:00:00Z')
+    const user = await createTestUser(h.db, { plan: 'starter', subscriptionStatus: 'trialing', trialEndsAt: new Date('2026-11-04T12:00:00Z') })
+    await h.s.usage.reserve(user.id, { meter: 'clip_seconds', amount: 3_600, idempotencyKey: 'trial:1' })
+    h.clock.set('2026-11-01T09:00:00Z')
+    const balance = await h.s.usage.balance(user.id)
+    expect(balance).toMatchObject({ used: 3_600, remaining: 0 })
+    expect(balance.period.start.toISOString()).toBe('2026-10-28T12:00:00.000Z')
+    await expectAppError(h.s.usage.reserve(user.id, { meter: 'clip_seconds', amount: 60, idempotencyKey: 'trial:2' }), 'limit_exceeded')
+  })
+
+  it('a stale Stripe period (late renewal webhook) rolls forward instead of opening a calendar month (review)', async () => {
+    h.clock.set('2026-11-10T00:00:00Z')
+    const user = await createTestUser(h.db, { plan: 'pro', currentPeriodStart: new Date('2026-10-12T00:00:00Z'), currentPeriodEnd: new Date('2026-11-12T00:00:00Z') })
+    h.clock.set('2026-11-13T00:00:00Z') // the renewal webhook has not arrived yet
+    await h.s.usage.reserve(user.id, { meter: 'clip_seconds', amount: 72_000, idempotencyKey: 'pro:all' })
+    // the webhook arrives: same period start, so the 20 h already reserved still count
+    await h.r.users.updateBilling(user.id, { currentPeriodStart: new Date('2026-11-12T00:00:00Z'), currentPeriodEnd: new Date('2026-12-12T00:00:00Z') })
+    expect(await h.s.usage.balance(user.id)).toMatchObject({ used: 72_000, remaining: 0 })
   })
 
   it('past_due blocks reservations; canceled holds them', async () => {

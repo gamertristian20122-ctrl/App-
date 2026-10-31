@@ -308,6 +308,40 @@ describe('approvals', () => {
     await expectAppError(h.s.approvals.editVariant(other.userId, { draftId: other.draftId, nonce: 'z'.repeat(43), platform: 'x', text: 'no' }), 'forbidden')
   })
 
+  it('a TikTok draft without privacy can be approved once the person chooses it (e2e: clip drafts were stuck)', async () => {
+    const t = await tenant(h)
+    await connect(h, t.userId, t.brandId, 'tiktok')
+    const clip = await video(h, t.userId, t.brandId)
+    // like the drafts the worker makes from clips and renders: no privacyLevel
+    const view = await h.s.drafts.create(t.userId, { brandId: t.brandId, variants: [{ platform: 'tiktok', text: 'New clip', mediaIds: [clip.id] }] }, { via: 'worker' })
+    expect(view.ready).toBe(false)
+    const n = await h.s.approvals.issueNonce(t.userId, view.draft.id, { via: 'mcp' })
+    await expectAppError(h.s.approvals.approve(t.userId, { draftId: view.draft.id, nonce: n.nonce }), 'validation', /privacyLevel/)
+
+    // only TikTok has this setting, and only known levels
+    await expectAppError(
+      h.s.approvals.editVariant(t.userId, { draftId: view.draft.id, nonce: n.nonce, platform: 'x', privacyLevel: 'SELF_ONLY' }),
+      'validation',
+    )
+    await expectAppError(
+      h.s.approvals.editVariant(t.userId, { draftId: view.draft.id, nonce: n.nonce, platform: 'tiktok', privacyLevel: 'EVERYONE' }),
+      'validation',
+    )
+
+    const edited = await h.s.approvals.editVariant(
+      t.userId,
+      { draftId: view.draft.id, nonce: n.nonce, platform: 'tiktok', privacyLevel: 'MUTUAL_FOLLOW_FRIENDS' },
+      { via: 'mcp' },
+    )
+    expect(edited.draft.ready).toBe(true)
+    expect(edited.draft.variants[0]?.options).toEqual({ privacyLevel: 'MUTUAL_FOLLOW_FRIENDS' })
+    expect(edited.draft.variants[0]?.text).toBe('New clip')
+    const decided = await h.s.approvals.decide(t.userId, { draftId: view.draft.id, nonce: edited.nonce.nonce, decision: 'approve' })
+    expect(decided.draft.status).toBe('approved')
+    const audit = await h.s.audit.list(t.userId, { subjectId: view.draft.id })
+    expect(audit.some((a) => (a.meta as { privacyLevel?: string }).privacyLevel === 'MUTUAL_FOLLOW_FRIENDS')).toBe(true)
+  })
+
   it('edit after approval drops the approval; schedule is refused until re-approved', async () => {
     const t = await tenant(h)
     await connect(h, t.userId, t.brandId, 'x')

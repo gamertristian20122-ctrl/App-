@@ -10,15 +10,19 @@ import {
   DraftInputSchema,
   DriveLinkInputSchema,
   EditVariantInputSchema,
+  EMPTY_EDIT_MESSAGE,
   GetAnalyticsInputSchema,
   GetTranscriptInputSchema,
   IdSchema,
   ImportPastPostsInputSchema,
+  PLATFORM_OPTION_LABELS,
   PlatformOptionsSchemas,
   PostStatusInputSchema,
   RenderCarouselInputSchema,
   RenderVideoInputSchema,
   SaveVoiceProfileInputSchema,
+  TIKTOK_PRIVACY_LABELS,
+  TIKTOK_PRIVACY_LEVELS,
   TimestampMsSchema,
   TimezoneSchema,
   UploadRequestSchema,
@@ -27,6 +31,7 @@ import {
   VoiceProfileSchema,
   cleanText,
   createScheduleInputSchema,
+  describeOptions,
   mediaKindForMime,
   validateClipRanges,
 } from '../src/validation'
@@ -114,9 +119,10 @@ describe('variants and drafts', () => {
       ],
     })
     expect(messages(r)).toEqual([
-      expect.stringMatching(/^variants\.0\.text: x: Text is 300/),
-      'variants.1.platform: Only one x variant per draft.',
-      'variants.3.title: youtube: A title is required.',
+      // platform names as people read them ("X", "YouTube"), not ids
+      expect.stringMatching(/^variants\.0\.text: X: Text is 300/),
+      'variants.1.platform: Only one X variant per draft.',
+      'variants.3.title: YouTube: A title is required.',
     ])
   })
 
@@ -129,7 +135,7 @@ describe('variants and drafts', () => {
     expect(UpsertVariantInputSchema.safeParse({ draftId: DRAFT, variant: { platform: 'x', text: 'ok' } }).success).toBe(true)
     expect(
       messages(UpsertVariantInputSchema.safeParse({ draftId: DRAFT, variant: { platform: 'x', text: 'see example.com' } })),
-    ).toEqual([expect.stringMatching(/^variant\.text: x: Links are not supported/)])
+    ).toEqual([expect.stringMatching(/^variant\.text: X: Links are not supported/)])
   })
 
   it('EditVariantInputSchema checks only the edited fields', () => {
@@ -141,6 +147,17 @@ describe('variants and drafts', () => {
       expect.stringMatching(/^text: Text is 281/),
     ])
     expect(EditVariantInputSchema.safeParse({ draftId: DRAFT, platform: 'youtube', title: 'a <b>' }).success).toBe(false)
+  })
+
+  it('EditVariantInputSchema lets the person choose TikTok privacy (e2e: clip drafts could not be approved)', () => {
+    expect(EditVariantInputSchema.safeParse({ draftId: DRAFT, platform: 'tiktok', privacyLevel: 'FOLLOWER_OF_CREATOR' }).success).toBe(true)
+    expect(messages(EditVariantInputSchema.safeParse({ draftId: DRAFT, platform: 'instagram', privacyLevel: 'SELF_ONLY' }))).toEqual([
+      'privacyLevel: privacyLevel can only be set on the TikTok variant.',
+    ])
+    expect(EditVariantInputSchema.safeParse({ draftId: DRAFT, platform: 'tiktok', privacyLevel: 'EVERYONE' }).success).toBe(false)
+    expect(messages(EditVariantInputSchema.safeParse({ draftId: DRAFT, platform: 'tiktok' }))).toEqual([`: ${EMPTY_EDIT_MESSAGE}`])
+    // every level has a label for the approval UIs
+    expect(Object.keys(TIKTOK_PRIVACY_LABELS).sort()).toEqual([...TIKTOK_PRIVACY_LEVELS].sort())
   })
 })
 
@@ -336,5 +353,62 @@ describe('JSON Schema export (MCP tool input schemas use io: "input")', () => {
     const json = z.toJSONSchema(schema, { io: 'input' }) as { type?: string; properties?: object }
     expect(json.type).toBe('object')
     expect(json.properties).toBeDefined()
+  })
+})
+
+describe('describeOptions (review: approval surfaces must show every publishable option)', () => {
+  it('has a label for every key of every platform options schema, and nothing else', () => {
+    for (const [platform, schema] of Object.entries(PlatformOptionsSchemas)) {
+      const keys = Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape).sort()
+      expect(Object.keys(PLATFORM_OPTION_LABELS[platform as keyof typeof PlatformOptionsSchemas]).sort(), platform).toEqual(keys)
+    }
+  })
+
+  it('describes every key when all are set (labels, Yes/No, lists, seconds, TikTok privacy labels)', () => {
+    const lines = describeOptions('tiktok', {
+      privacyLevel: 'SELF_ONLY',
+      disableComment: true,
+      brandContent: false,
+      coverTimestampMs: 2500,
+      firstComment: 'Link in bio',
+    })
+    expect(lines).toEqual([
+      { key: 'privacyLevel', label: 'Who can see', value: 'Only me' },
+      { key: 'disableComment', label: 'Comments off', value: 'Yes' },
+      { key: 'brandContent', label: 'Paid partnership (branded content)', value: 'No' },
+      { key: 'coverTimestampMs', label: 'Cover frame at', value: '2.5 s' },
+      { key: 'firstComment', label: 'First comment', value: 'Link in bio' },
+    ])
+    expect(describeOptions('instagram', { collaborators: ['a', 'b'] })).toEqual([{ key: 'collaborators', label: 'Collaborators (invited)', value: 'a, b' }])
+    expect(describeOptions('x', {})).toEqual([])
+    expect(describeOptions('x', null)).toEqual([])
+  })
+
+  it('shows unknown keys (e.g. older rows) by name instead of hiding them, and skips unset ones', () => {
+    expect(describeOptions('linkedin', { visibility: 'PUBLIC', legacy_field: { a: 1 }, pageId: undefined })).toEqual([
+      { key: 'visibility', label: 'Visibility', value: 'PUBLIC' },
+      { key: 'legacy_field', label: 'legacy_field', value: '{"a":1}' },
+    ])
+  })
+
+  it('every schema key set to a valid value yields one line per key', () => {
+    const samples: Record<string, Record<string, unknown>> = {
+      tiktok: { privacyLevel: 'PUBLIC_TO_EVERYONE', disableComment: true, disableDuet: true, disableStitch: true, brandContent: true, brandOrganic: true, isAiGenerated: true, coverTimestampMs: 0, firstComment: 'c' },
+      youtube: { privacyStatus: 'public', tags: ['a'], categoryId: '22', madeForKids: false, containsSyntheticMedia: false, playlistId: 'PL1', firstComment: 'c' },
+      instagram: { mediaType: 'REELS', shareToFeed: true, collaborators: ['x'], thumbOffsetMs: 1000, locationId: '1', firstComment: 'c' },
+      facebook: { mediaType: 'REELS', pageId: '1', firstComment: 'c' },
+      threads: { topicTag: 't', replyControl: 'everyone', firstComment: 'c' },
+      x: { longTextMode: 'thread', replySettings: 'everyone', firstComment: 'c' },
+      linkedin: { visibility: 'PUBLIC', pageId: '1', firstComment: 'c' },
+      pinterest: { boardId: 'b', link: 'https://example.com', altText: 'a' },
+      bluesky: { altText: 'a', langs: ['en'], firstComment: 'c' },
+    }
+    for (const [platform, schema] of Object.entries(PlatformOptionsSchemas)) {
+      const sample = samples[platform] ?? {}
+      const parsed = (schema as z.ZodType).parse(sample) as Record<string, unknown>
+      const keys = Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape)
+      expect(Object.keys(parsed).sort(), platform).toEqual([...keys].sort())
+      expect(describeOptions(platform as keyof typeof PlatformOptionsSchemas, parsed).map((l) => l.key).sort(), platform).toEqual([...keys].sort())
+    }
   })
 })

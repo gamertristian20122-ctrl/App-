@@ -237,3 +237,74 @@ describe('approval actions', () => {
     expect(defaultScheduleIso(new Date('2026-11-02T15:07:00Z'))).toBe('2026-11-02T16:15:00.000Z')
   })
 })
+
+describe('TikTok privacy (e2e regression: drafts from clips could not be approved anywhere)', () => {
+  it('offers the choice in the queue, saves it with the card nonce, and then the draft can be approved', async () => {
+    const t = await h.tenant({ platforms: ['tiktok'] })
+    const imageId = await h.image(t.userId, t.brandId)
+    // like the worker's clip/render drafts: no privacyLevel
+    const view = await h.services.drafts.create(t.userId, { brandId: t.brandId, variants: [{ platform: 'tiktok', text: 'Swipe through', mediaIds: [imageId] }] }, { via: 'worker' })
+    const draftId = view.draft.id
+    const data = await loadApprovals(h.services, t.userId, { focusDraftId: draftId })
+    const nonce = data.items[0]?.nonce ?? ''
+    expect(data.items[0]?.preview.ready).toBe(false)
+    const html = renderToStaticMarkup(<ApprovalsView data={data} actions={actions} now={NOW} brandFilter={null} />)
+    expect(html).toContain('Who can see this TikTok post')
+    expect(html).toContain('name="privacyLevel"')
+    expect(html).toContain('Only me')
+
+    const bad = await editVariant(h.services, t.userId, form({ draftId, nonce, platform: 'tiktok', privacyLevel: 'EVERYONE' }))
+    expect(bad.ok).toBe(false)
+    const saved = await editVariant(h.services, t.userId, form({ draftId, nonce, platform: 'tiktok', privacyLevel: 'PUBLIC_TO_EVERYONE' }))
+    expect(saved.ok).toBe(true)
+    expect(saved.message).toContain('who can see the TikTok post')
+    const after = await h.services.drafts.get(t.userId, draftId)
+    expect(after.variants[0]).toMatchObject({ text: 'Swipe through', options: { privacyLevel: 'PUBLIC_TO_EVERYONE' } })
+
+    const fresh = await loadApprovals(h.services, t.userId, { focusDraftId: draftId })
+    expect(fresh.items[0]?.preview.ready).toBe(true)
+    expect((await approveDraft(h.services, t.userId, form({ draftId, nonce: fresh.items[0]?.nonce ?? '' }))).ok).toBe(true)
+  })
+})
+
+describe('publishable options (review: a hidden first comment was approved unseen)', () => {
+  it('the queue shows every option the variant publishes with', async () => {
+    const imageId = await h.image(userId, brandId)
+    const id = await draft([
+      {
+        platform: 'instagram',
+        text: 'Big launch today!',
+        mediaIds: [imageId],
+        options: { firstComment: 'Get it here https://scam.example', collaborators: ['attacker'] },
+      },
+    ])
+    const data = await loadApprovals(h.services, userId, { focusDraftId: id })
+    const ig = data.items[0]?.preview.variants[0]
+    expect(ig?.optionLines).toEqual([
+      { key: 'collaborators', label: 'Collaborators (invited)', value: 'attacker' },
+      { key: 'firstComment', label: 'First comment', value: 'Get it here https://scam.example' },
+    ])
+    const html = renderToStaticMarkup(<ApprovalsView data={data} actions={actions} now={NOW} brandFilter={null} />)
+    expect(html).toContain('First comment')
+    expect(html).toContain('Get it here https://scam.example')
+    expect(html).toContain('Collaborators (invited)')
+    expect(html).toContain('attacker')
+  })
+})
+
+describe('OptionList (also used by /approve/[nonce])', () => {
+  it('leaves out TikTok "Who can see" only where a picker shows it', async () => {
+    const { OptionList } = await import('@/components/platform/preview-card')
+    const v = {
+      platform: 'tiktok' as const,
+      optionLines: [
+        { key: 'privacyLevel', label: 'Who can see', value: 'Everyone' },
+        { key: 'brandContent', label: 'Paid partnership (branded content)', value: 'Yes' },
+      ],
+    } as unknown as Parameters<typeof OptionList>[0]['variant']
+    const withPicker = renderToStaticMarkup(<OptionList variant={v} skipPrivacyPicker />)
+    expect(withPicker).not.toContain('Who can see')
+    expect(withPicker).toContain('Paid partnership (branded content)')
+    expect(renderToStaticMarkup(<OptionList variant={v} />)).toContain('Who can see')
+  })
+})

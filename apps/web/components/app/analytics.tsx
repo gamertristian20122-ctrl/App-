@@ -7,7 +7,7 @@ import type { WeeklyReview } from '@app/services'
 import { PlatformBadge } from '@/components/platform/platform-badge'
 import { Card, EmptyState, LinkButton, PageHeader, Stat, type Tone } from '@/components/ui/primitives'
 import { cx, link } from '@/components/ui/styles'
-import { excerpt, formatChange, formatCount, formatDate } from '@/lib/ui/format'
+import { excerpt, formatChange, formatCount, formatDate, plural } from '@/lib/ui/format'
 import { safeExternalUrl } from '@/lib/ui/paths'
 
 const METRICS = [
@@ -96,7 +96,7 @@ function BrandReview({ review }: { review: WeeklyReview }) {
             </ul>
           )}
           <p className="mt-4 text-xs text-neutral-500">
-            Pipeline: {review.upcoming.scheduled} scheduled, {review.upcoming.drafts} drafts waiting.
+            Pipeline: {review.upcoming.scheduled.toLocaleString('en-US')} scheduled, {plural(review.upcoming.drafts, 'draft')} waiting for approval.
           </p>
         </section>
       </div>

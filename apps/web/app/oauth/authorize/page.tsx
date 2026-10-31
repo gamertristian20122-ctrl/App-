@@ -33,13 +33,20 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
   const user = await getCurrentUser(authDeps())
   const state = await loadConsent(services, user, sp)
 
-  if (state.kind === 'redirect' || state.kind === 'login') redirect(state.url)
+  if (state.kind === 'login') redirect(state.url)
   if (state.kind === 'error') {
     return (
       <Shell>
         <h1 className="text-lg font-semibold">This connection request cannot be completed</h1>
         <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">{state.message}</p>
         <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">Go back to your AI app and try connecting again.</p>
+        {state.returnTo ? (
+          <p className="mt-4 text-sm">
+            <a href={state.returnTo.url} rel="noreferrer" className="text-indigo-700 underline dark:text-indigo-300">
+              Return to <span className="break-all font-mono">{state.returnTo.host}</span>
+            </a>
+          </p>
+        ) : null}
       </Shell>
     )
   }

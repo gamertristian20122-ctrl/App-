@@ -21,7 +21,7 @@ import {
   seedTenant,
 } from '../src/testing'
 import type { Db } from '../src/types'
-import { expectDbError } from './helpers'
+import { expectDbError, tick } from './helpers'
 
 let db: Db
 beforeAll(async () => {
@@ -65,6 +65,9 @@ describe('users', () => {
     const user = await createTestUser(db)
     await db.query(`update public.users set updated_at = now() - interval '1 day' where id = $1`, [user.id])
     const before = await users.get(db, user.id)
+    // The trigger overrides the back-dated value above with now(), so on a fast real Postgres both
+    // updates can land in the same millisecond (the Date we compare): wait a few ms first.
+    await tick()
     const after = await users.updateProfile(db, user.id, { displayName: 'New name' })
     expect(after?.updatedAt.getTime()).toBeGreaterThanOrEqual(before?.createdAt.getTime() ?? 0)
     expect(after?.updatedAt.getTime()).not.toBe(before?.updatedAt.getTime())

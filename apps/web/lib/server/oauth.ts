@@ -130,8 +130,7 @@ export function authorizeQuery(params: AuthorizeParams): string {
 }
 
 export type ConsentState =
-  | { kind: 'error'; message: string }
-  | { kind: 'redirect'; url: string }
+  | { kind: 'error'; message: string; returnTo?: { url: string; host: string } }
   | { kind: 'login'; url: string }
   | { kind: 'consent'; request: AuthorizeRequest; params: AuthorizeParams; user: CurrentUser; loopback: boolean }
 
@@ -140,9 +139,21 @@ function failure(error: unknown): { kind: 'error'; message: string } | { kind: '
   return { kind: 'error', message: oauthErrorResponse(error).body.error_description }
 }
 
+function hostOf(url: string): string {
+  try {
+    const u = new URL(url)
+    return u.host || u.protocol
+  } catch {
+    return url
+  }
+}
+
 /**
- * What GET /oauth/authorize shows. The request is validated first (errors before the client and
- * redirect URI are verified are shown here, never redirected); then the user must be signed in.
+ * What GET /oauth/authorize shows. The request is validated first, then the user must be signed
+ * in. Errors are always shown here, never redirected automatically: every client registers
+ * itself (open DCR), so an automatic redirect to its URI would be an open redirect on our domain
+ * (RFC 9700 §4.11.2). When the client's redirect URI is verified, the error page offers a link
+ * back to it that names the destination host and needs a click.
  */
 export async function loadConsent(
   services: Services,
@@ -155,7 +166,9 @@ export async function loadConsent(
   try {
     request = await services.oauth.validateAuthorizeRequest(params)
   } catch (error) {
-    return failure(error)
+    const result = failure(error)
+    if (result.kind === 'error') return result
+    return { kind: 'error', message: oauthErrorResponse(error).body.error_description, returnTo: { url: result.url, host: hostOf(result.url) } }
   }
   if (!user) {
     const next = `/oauth/authorize?${authorizeQuery(params)}`

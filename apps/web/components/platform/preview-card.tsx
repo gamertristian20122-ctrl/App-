@@ -78,13 +78,42 @@ export function LengthMeter({ used, max, unit }: { used: number; max: number; un
   )
 }
 
+/**
+ * Everything the variant publishes besides its text and media (first comment, collaborators,
+ * visibility, page/board/playlist ids...), so nothing is approved unseen. TikTok's "Who can see"
+ * is left out when the surface shows its own picker for it.
+ */
+export function OptionList({ variant: v, skipPrivacyPicker = false }: { variant: PreviewVariant; skipPrivacyPicker?: boolean }) {
+  const lines = v.optionLines.filter((l) => !(skipPrivacyPicker && v.platform === 'tiktok' && l.key === 'privacyLevel'))
+  if (lines.length === 0) return null
+  return (
+    <dl aria-label="Also published with this post" className="space-y-1 rounded-lg border border-neutral-200 px-3 py-2 text-xs dark:border-neutral-800">
+      {lines.map((l) => (
+        <div key={l.key} className="flex gap-2">
+          <dt className="shrink-0 text-neutral-500">{l.label}:</dt>
+          <dd className="min-w-0 whitespace-pre-wrap break-words">{l.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
 function accountLabel(v: PreviewVariant): { text: string; ok: boolean } {
   if (!v.account) return { text: 'No account connected', ok: false }
   const name = v.account.handle ? `@${v.account.handle.replace(/^@/, '')}` : (v.account.displayName ?? 'Connected account')
   return { text: name, ok: v.account.status === 'active' }
 }
 
-export function PreviewCard({ variant: v, children }: { variant: PreviewVariant; children?: ReactNode }) {
+export function PreviewCard({
+  variant: v,
+  children,
+  privacyPicker = false,
+}: {
+  variant: PreviewVariant
+  children?: ReactNode
+  /** The children include the TikTok "Who can see" picker (its option line is then left out). */
+  privacyPicker?: boolean
+}) {
   const vertical = VERTICAL.includes(v.platform)
   const pin = v.platform === 'pinterest'
   const account = accountLabel(v)
@@ -128,6 +157,8 @@ export function PreviewCard({ variant: v, children }: { variant: PreviewVariant;
       {!vertical && !pin ? media : null}
 
       <LengthMeter used={v.length.used} max={v.length.max} unit={v.length.unit} />
+
+      <OptionList variant={v} skipPrivacyPicker={privacyPicker} />
 
       {errors.length > 0 || warnings.length > 0 ? (
         <ul className="space-y-1 text-xs">

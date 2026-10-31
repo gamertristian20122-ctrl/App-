@@ -132,6 +132,36 @@ describe('oauth flow', () => {
     await expectAppError(h.s.oauth.token({ grant_type: 'password', username: 'x' }), 'bad_request', /grant_type/)
   })
 
+  it('a wrong verifier or client does not use up the code (review: anyone holding the code could burn it)', async () => {
+    const { userId } = await tenant(h)
+    const a = await register()
+    const b = await register()
+    const v = verifier()
+    const { code } = await authorizeCode(userId, a.client_id, v)
+    await expectAppError(h.s.oauth.token({ grant_type: 'authorization_code', code, code_verifier: verifier(), client_id: a.client_id }), 'bad_request', /code_verifier/)
+    await expectAppError(h.s.oauth.token({ grant_type: 'authorization_code', code, code_verifier: v, client_id: b.client_id }), 'bad_request', /another client/)
+    const tokens = await h.s.oauth.token({ grant_type: 'authorization_code', code, code_verifier: v, client_id: a.client_id })
+    expect(tokens.token_type).toBe('Bearer')
+  })
+
+  it('a second redemption of a code revokes the tokens the first one issued (review: OAuth 2.1 §4.1.3)', async () => {
+    const { userId } = await tenant(h)
+    const a = await register()
+    const v = verifier()
+    const { code } = await authorizeCode(userId, a.client_id, v)
+    const first = await h.s.oauth.token({ grant_type: 'authorization_code', code, code_verifier: v, client_id: a.client_id })
+    expect(await h.s.oauth.verifyAccessToken(`Bearer ${first.access_token}`)).toMatchObject({ userId })
+    const replay = await expectAppError(h.s.oauth.token({ grant_type: 'authorization_code', code, code_verifier: v, client_id: a.client_id }), 'bad_request')
+    expect(oauthErrorResponse(replay).body.error).toBe('invalid_grant')
+    await expectAppError(h.s.oauth.verifyAccessToken(`Bearer ${first.access_token}`), 'unauthorized')
+    await expectAppError(h.s.oauth.token({ grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: a.client_id }), 'bad_request')
+    // even a replay with a wrong verifier counts: the code was already used
+    const other = await authorizeCode(userId, a.client_id, v)
+    const second = await h.s.oauth.token({ grant_type: 'authorization_code', code: other.code, code_verifier: v, client_id: a.client_id })
+    await expectAppError(h.s.oauth.token({ grant_type: 'authorization_code', code: other.code, code_verifier: verifier(), client_id: a.client_id }), 'bad_request')
+    await expectAppError(h.s.oauth.verifyAccessToken(`Bearer ${second.access_token}`), 'unauthorized')
+  })
+
   it('rotates refresh tokens and revokes the family when a rotated token is reused', async () => {
     const { userId } = await tenant(h)
     const client = await register()

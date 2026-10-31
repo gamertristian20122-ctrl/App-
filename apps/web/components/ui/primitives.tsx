@@ -157,20 +157,28 @@ export function LinkButton({ href, children, variant = 'secondary', className }:
   )
 }
 
+/** Bar colour: allowances (clip hours) warn at 80 % and are red when used up; slots (brands) are only red when over. */
+export function meterTone(used: number, limit: number, kind: 'allowance' | 'slots' = 'allowance'): string {
+  if (kind === 'slots') return used > limit ? 'bg-red-500' : 'bg-indigo-600'
+  const pct = percentOf(used, limit)
+  return pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-indigo-600'
+}
+
 /**
  * A labelled usage meter: "1.5 h of 4 h". Uses <meter> (exposed to assistive technology) and a
- * styled bar; amber above 80 %, red when full.
+ * styled bar (see meterTone: using every brand slot is normal, not an error).
  */
-export function Meter({ label, used, limit, display, hint }: {
+export function Meter({ label, used, limit, display, hint, kind = 'allowance' }: {
   label: string
   used: number
   limit: number
   /** "1.5 h of 4 h" */
   display: string
   hint?: ReactNode
+  kind?: 'allowance' | 'slots'
 }) {
   const pct = percentOf(used, limit)
-  const tone = pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-indigo-600'
+  const tone = meterTone(used, limit, kind)
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3 text-sm">

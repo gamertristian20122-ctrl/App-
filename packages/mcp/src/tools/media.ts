@@ -13,8 +13,10 @@ import {
   RenderVideoInputSchema,
 } from '@app/core/validation'
 import { isClipSource, type TranscriptView } from '@app/services'
+import { pageSegments, pickClipsRules, wordTimings, WORD_RANGE_MAX_MS } from '../playbook'
 import { excerpt, ok, plural } from '../results'
 import { clipView, jobViewForModel, mediaViewForModel } from '../views'
+import type { McpContext } from '../context'
 import { READ_ONLY, type ToolDef } from './types'
 
 const TIMESTAMP = 'Milliseconds (number), or a timestamp string like "01:23.500" or "83.5s".'
@@ -31,30 +33,73 @@ function range(s: number, e: number): string {
   return `[${formatMs(s)}–${formatMs(e)} | ${s}–${e} ms]`
 }
 
-function transcriptText(t: TranscriptView): string {
-  if (t.status !== 'ready') return `Transcript of ${t.mediaId}: ${t.status}. ${t.message ?? ''}`.trim()
-  const head = `Transcript of ${t.mediaId} (${t.language ?? 'unknown language'}, ${formatMs(t.durationMs ?? 0)} long).`
-  const lines = [head]
+interface TranscriptPage {
+  text: string
+  structured: Record<string, unknown>
+}
+
+/**
+ * The model-facing transcript: segments within a text budget (with nextStartMs to page), word
+ * timings ("word@startMs") for short ranges, and the clip-picking rules on the first page. The
+ * structured copy holds only what the text shows, so a long video never floods the context.
+ */
+function transcriptPage(t: TranscriptView, args: { startMs?: number | undefined; endMs?: number | undefined; query?: string | undefined }): TranscriptPage {
+  const base = { mediaId: t.mediaId, status: t.status, language: t.language, durationMs: t.durationMs, ...(t.engine ? { engine: t.engine } : {}) }
+  if (t.status !== 'ready') {
+    const text = `Transcript of ${t.mediaId}: ${t.status}. ${t.message ?? ''}`.trim()
+    return { text, structured: { ...base, ...(t.message ? { message: t.message } : {}), segments: [] } }
+  }
+  const lines = [`Transcript of ${t.mediaId} (${t.language ?? 'unknown language'}, ${formatMs(t.durationMs ?? 0)} long).`]
   if (t.matches) {
     lines.push(t.matches.length === 0 ? 'No segment matches the query.' : `${plural(t.matches.length, 'matching segment')}:`)
     lines.push(...t.matches.map((m) => `${range(m.startMs, m.endMs)} ${m.text}`))
-  } else {
-    lines.push(...t.segments.map((s) => `${range(s.s, s.e)} ${s.t}`))
+    lines.push('Use these millisecond ranges with make_clips (startMs/endMs), or read around a match with get_transcript { mediaId, startMs, endMs }.')
+    return { text: lines.join('\n'), structured: { ...base, matches: t.matches } }
   }
-  if (t.message) lines.push(t.message)
-  lines.push('Use these millisecond ranges with make_clips (startMs/endMs). Ask for a range (startMs/endMs) to get word timings.')
-  return lines.join('\n')
+  const ranged = args.startMs !== undefined || args.endMs !== undefined
+  const page = pageSegments(t.segments)
+  if (ranged) lines.push(`Segments from ${formatMs(args.startMs ?? 0)}${args.endMs !== undefined ? ` to ${formatMs(args.endMs)}` : ''}:`)
+  lines.push(...page.lines)
+  const structured: Record<string, unknown> = { ...base, segments: page.shown, nextStartMs: page.nextStartMs }
+  if (page.nextStartMs !== null) {
+    lines.push(`More follows. Call get_transcript { mediaId: "${t.mediaId}", startMs: ${page.nextStartMs} } for the next part.`)
+  }
+  const span = (args.endMs ?? Number.MAX_SAFE_INTEGER) - (args.startMs ?? 0)
+  if (ranged && t.words && span <= WORD_RANGE_MAX_MS) {
+    const words = wordTimings(t.words)
+    lines.push(`Word timings (word@startMs)${words.complete ? '' : ', first part only (ask for a narrower range for the rest)'}:`, words.text || '(no words in this range)')
+    structured.words = words.shown
+  } else if (ranged) {
+    lines.push(`For word timings, ask for a range of ${WORD_RANGE_MAX_MS / 60_000} minutes or less.`)
+  } else {
+    lines.push('', ...pickClipsRules(t.mediaId), '')
+  }
+  lines.push('Use these millisecond ranges with make_clips (startMs/endMs).')
+  return { text: lines.join('\n'), structured }
+}
+
+/** The no-argument listing: source videos (to transcribe and clip) and ready images / audio / other videos. */
+async function mediaLibrary(ctx: McpContext) {
+  const [videos, images, audio] = await Promise.all([
+    ctx.services.media.list(ctx.userId, { kind: 'video', limit: 50 }),
+    ctx.services.media.list(ctx.userId, { kind: 'image', status: 'ready', limit: 50 }),
+    ctx.services.media.list(ctx.userId, { kind: 'audio', status: 'ready', limit: 20 }),
+  ])
+  const sources = videos.items.filter((m) => isClipSource(m) && m.status !== 'deleted')
+  const otherVideos = videos.items.filter((m) => !isClipSource(m) && m.status === 'ready')
+  return { sources, otherVideos, images: images.items, audio: audio.items }
 }
 
 export const getTranscript: ToolDef = {
   name: 'get_transcript',
   title: 'Get a video transcript',
   description:
-    'Returns the timestamped transcript of one of the user\'s source videos (segments with start/end in milliseconds), optionally only a time range (with word timings) or the segments matching a search query. ' +
-    'Without mediaId it lists the user\'s source videos and their ids. Use the pick_clips prompt to choose clip moments.',
+    'Returns the timestamped transcript of one of the user\'s source videos (segments with start/end in milliseconds) with the rules for picking clips. Long transcripts come in parts: call again with startMs = nextStartMs. ' +
+    'A range of 5 minutes or less (startMs/endMs) adds word timings for precise cuts; query returns only the matching segments. ' +
+    'Without mediaId it lists the user\'s media library with ids: source videos (to clip), and ready images, audio and other videos (for create_draft mediaIds, render_carousel imageMediaId, render_video imageMediaId / audioMediaId).',
   input: GetTranscriptToolSchema,
   describe: {
-    mediaId: 'The source video id. Omit to list the user\'s source videos.',
+    mediaId: 'The source video id. Omit to list the user\'s media (videos, images, audio) with their ids.',
     startMs: `Start of the range. ${TIMESTAMP}`,
     endMs: `End of the range. ${TIMESTAMP}`,
     query: 'Only segments containing this text (case-insensitive).',
@@ -62,22 +107,38 @@ export const getTranscript: ToolDef = {
   annotations: READ_ONLY,
   async run(ctx, args) {
     if (args.mediaId === undefined) {
-      const page = await ctx.services.media.list(ctx.userId, { kind: 'video', limit: 50 })
-      const sources = page.items.filter((m) => isClipSource(m) && m.status !== 'deleted')
-      if (sources.length === 0) {
+      const lib = await mediaLibrary(ctx)
+      const total = lib.sources.length + lib.otherVideos.length + lib.images.length + lib.audio.length
+      if (total === 0) {
         return ok(
-          'No source videos yet. The user uploads a video they own (or adds a Google Drive / Dropbox / OneDrive link) on the Media page of the web app; YouTube links are not accepted.',
-          { sources: [] },
+          'No media yet. The user uploads a video they own (or adds a Google Drive / Dropbox / OneDrive link), images or audio on the Media page of the web app; YouTube links are not accepted.',
+          { sources: [], images: [], audio: [], videos: [] },
         )
       }
-      const lines = sources.map((m) => `- ${m.id}: ${m.status}${m.durationMs ? `, ${formatMs(m.durationMs)}` : ''}, added ${m.createdAt.toISOString()}`)
-      return ok(`${plural(sources.length, 'source video')} (newest first):\n${lines.join('\n')}\nCall get_transcript with one of these mediaIds.`, {
-        sources: sources.map(mediaViewForModel),
+      const line = (m: (typeof lib.sources)[number]) =>
+        `- ${m.id}: ${m.status}${m.durationMs ? `, ${formatMs(m.durationMs)}` : ''}${m.width && m.height ? `, ${m.width}×${m.height}` : ''}, added ${m.createdAt.toISOString()}`
+      const parts: string[] = []
+      if (lib.sources.length > 0) {
+        parts.push(`${plural(lib.sources.length, 'source video')} to transcribe and clip (newest first):`, ...lib.sources.map(line), 'Call get_transcript with one of these mediaIds.')
+      } else {
+        parts.push('No source videos to clip yet (the user uploads one on the Media page and confirms they own it).')
+      }
+      if (lib.images.length > 0) parts.push(`${plural(lib.images.length, 'image')} (create_draft mediaIds, render_carousel / render_video imageMediaId):`, ...lib.images.map(line))
+      if (lib.audio.length > 0) parts.push(`${plural(lib.audio.length, 'audio file')} (render_video audioMediaId):`, ...lib.audio.map(line))
+      if (lib.otherVideos.length > 0) parts.push(`${plural(lib.otherVideos.length, 'other video')} (clips and renders, for create_draft mediaIds):`, ...lib.otherVideos.map(line))
+      return ok(parts.join('\n'), {
+        sources: lib.sources.map(mediaViewForModel),
+        images: lib.images.map(mediaViewForModel),
+        audio: lib.audio.map(mediaViewForModel),
+        videos: lib.otherVideos.map(mediaViewForModel),
       })
     }
     const t = await ctx.services.transcripts.get(ctx.userId, args)
-    const { text: _text, ...rest } = t
-    return ok(transcriptText(t), { transcript: rest })
+    // the raw args may carry "01:23.500" style timestamps: use the parsed milliseconds
+    const parsed = GetTranscriptToolSchema.safeParse(args)
+    const q = parsed.success ? parsed.data : {}
+    const page = transcriptPage(t, { startMs: q.startMs, endMs: q.endMs, query: q.query })
+    return ok(page.text, { transcript: page.structured })
   },
 }
 

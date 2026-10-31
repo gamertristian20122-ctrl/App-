@@ -145,7 +145,8 @@ describe('maintenance (system)', () => {
     const postVideo = await h.s.media.createUpload(userId, { filename: 'p.mp4', contentType: 'video/mp4', bytes: 10 })
     await connect(h, userId, brandId, 'x')
     const d = await approvedDraft(h, userId, brandId, [{ platform: 'x', text: 'due' }])
-    await h.s.posts.schedule(userId, { draftId: d.draft.id, at: new Date(START.getTime() + HOUR).toISOString() })
+    const [due] = await h.s.posts.schedule(userId, { draftId: d.draft.id, at: new Date(START.getTime() + HOUR).toISOString() })
+    await h.db.query(`delete from public.jobs where payload->>'postId' = $1`, [due?.id]) // its publish job was lost
 
     const later = new Date(Date.now() + 31 * DAY)
     const res = await h.s.maintenance.cleanup({ now: later })
@@ -197,6 +198,43 @@ describe('maintenance (system)', () => {
     const res = await h.s.maintenance.cleanup({ now: new Date(Date.now() + 31 * DAY), sourceBatch: 2 })
     expect(res.deletedSources).toBe(1)
     expect((await h.r.media.get(userId, src.id))?.status).toBe('deleted')
+  })
+
+  it('retention keeps a source that a live draft or a scheduled post still publishes (review)', async () => {
+    const { userId, brandId } = await tenant(h)
+    await connect(h, userId, brandId, 'youtube')
+    const { media: src } = await h.s.media.registerDriveLink(userId, { brandId, url: 'https://drive.google.com/file/d/3/view', rightsAttested: true })
+    await h.s.media.markIngested(userId, src.id, { durationMs: 120_000, width: 1920, height: 1080, mimeType: 'video/mp4' })
+    await h.storage.putBytes(src.storageKey, new Uint8Array(10), 'video/mp4')
+    const view = await h.s.drafts.create(userId, { brandId, variants: [{ platform: 'youtube', title: 'Full episode', text: 'The whole talk', mediaIds: [src.id] }] })
+
+    const later = new Date(Date.now() + 31 * DAY)
+    expect((await h.s.maintenance.cleanup({ now: later })).deletedSources).toBe(0)
+    expect((await h.r.media.get(userId, src.id))?.status).toBe('ready')
+    expect(await h.storage.head(src.storageKey)).not.toBeNull()
+
+    // once the draft is archived the source is past retention and goes
+    await h.s.drafts.archive(userId, view.draft.id)
+    expect((await h.s.maintenance.cleanup({ now: later })).deletedSources).toBe(1)
+    expect((await h.r.media.get(userId, src.id))?.status).toBe('deleted')
+  })
+
+  it('cleanup fails clips stuck queued/rendering whose render job died, freeing their slot (review)', async () => {
+    const { userId, brandId } = await tenant(h)
+    const { media: src } = await h.s.media.registerDriveLink(userId, { brandId, url: 'https://drive.google.com/file/d/4/view', rightsAttested: true })
+    await h.s.media.markIngested(userId, src.id, { durationMs: 120_000 })
+    const stuck = await h.r.clips.create(userId, { brandId, sourceMediaId: src.id, startMs: 0, endMs: 20_000 })
+    await h.r.clips.update(userId, stuck.id, { status: 'rendering' })
+    const dead = await h.s.jobs.enqueue({ type: 'clip_render', payload: { userId, clipId: stuck.id }, idempotencyKey: `clip_render:${stuck.id}` })
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where id = $1`, [dead.job.id])
+    const live = await h.r.clips.create(userId, { brandId, sourceMediaId: src.id, startMs: 20_000, endMs: 40_000 })
+    await h.s.jobs.enqueue({ type: 'clip_render', payload: { userId, clipId: live.id }, idempotencyKey: `clip_render:${live.id}` })
+
+    const res = await h.s.maintenance.cleanup({ now: new Date(Date.now() + HOUR) })
+    expect(res.failedClips).toBe(1)
+    expect(await h.s.clips.get(userId, stuck.id)).toMatchObject({ status: 'failed', error: expect.stringMatching(/Ask for this clip again/) })
+    expect((await h.s.clips.get(userId, live.id)).status).toBe('queued')
+    expect((await h.s.maintenance.cleanup({ now: new Date(Date.now() + HOUR) })).failedClips).toBe(0)
   })
 
   it('applies provider account status by profile ref', async () => {

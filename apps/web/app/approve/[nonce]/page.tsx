@@ -6,11 +6,13 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import type { ReactNode } from 'react'
+import { TIKTOK_PRIVACY_LABELS, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
 import type { PreviewVariant } from '@app/services'
+import { OptionList, unitLabel } from '@/components/platform/preview-card'
 import { getCurrentUser } from '@/lib/auth'
 import { loadApproval } from '@/lib/server/approve'
 import { authDeps, getRuntime } from '@/lib/server/deps'
-import { decideFromWeb } from './actions'
+import { decideFromWeb, setPrivacyFromWeb } from './actions'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +40,42 @@ function Notice({ tone, children }: { tone: 'ok' | 'warn' | 'error'; children: R
   )
 }
 
-function VariantCard({ v }: { v: PreviewVariant }) {
+/** TikTok requires the person to choose who can see each post (no default). */
+function TikTokPrivacy({ v, nonce }: { v: PreviewVariant; nonce: string }) {
+  if (v.platform !== 'tiktok') return null
+  const current = typeof v.options.privacyLevel === 'string' ? v.options.privacyLevel : ''
+  return (
+    <form action={setPrivacyFromWeb} className="mt-3 flex flex-wrap items-end gap-2" aria-label="TikTok privacy">
+      <input type="hidden" name="nonce" value={nonce} />
+      <label className="block min-w-48 flex-1 text-sm">
+        <span className="text-xs font-medium text-neutral-700 dark:text-neutral-300">Who can see this TikTok post</span>
+        <select
+          name="privacyLevel"
+          required
+          defaultValue={current}
+          className="mt-1 w-full rounded-lg border border-neutral-300 bg-transparent p-2 text-sm dark:border-neutral-700"
+        >
+          <option value="" disabled>
+            Choose…
+          </option>
+          {TIKTOK_PRIVACY_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {TIKTOK_PRIVACY_LABELS[level]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="submit"
+        className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+      >
+        Save
+      </button>
+    </form>
+  )
+}
+
+function VariantCard({ v, nonce }: { v: PreviewVariant; nonce: string }) {
   const over = v.length.used > v.length.max
   const problems = v.issues.filter((i) => i.severity === 'error')
   return (
@@ -68,8 +105,11 @@ function VariantCard({ v }: { v: PreviewVariant }) {
         </div>
       ) : null}
       <p className={`mt-3 text-xs ${over ? 'text-red-600' : 'text-neutral-500'}`}>
-        {v.length.used} / {v.length.max} {v.length.unit}
+        {v.length.used.toLocaleString('en-US')} / {v.length.max.toLocaleString('en-US')} {unitLabel(v.length.unit)}
       </p>
+      <div className="mt-3">
+        <OptionList variant={v} skipPrivacyPicker />
+      </div>
       {problems.length > 0 ? (
         <ul className="mt-2 list-disc pl-5 text-xs text-red-700 dark:text-red-300">
           {problems.map((i, n) => (
@@ -77,6 +117,7 @@ function VariantCard({ v }: { v: PreviewVariant }) {
           ))}
         </ul>
       ) : null}
+      <TikTokPrivacy v={v} nonce={nonce} />
     </section>
   )
 }
@@ -133,6 +174,7 @@ export default async function ApprovePage({
         {result === 'failed' ? (
           <Notice tone="error">This draft cannot be approved yet. Fix the problems below in the web app, then approve.</Notice>
         ) : null}
+        {result === 'saved' ? <Notice tone="ok">Saved. Review the draft, then approve.</Notice> : null}
         {preview.problems.length > 0 ? (
           <Notice tone="warn">
             <ul className="list-disc pl-5">
@@ -146,7 +188,7 @@ export default async function ApprovePage({
 
       <div className="mt-6 space-y-4">
         {preview.variants.map((v) => (
-          <VariantCard key={v.platform} v={v} />
+          <VariantCard key={v.platform} v={v} nonce={nonce} />
         ))}
       </div>
 

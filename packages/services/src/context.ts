@@ -137,7 +137,7 @@ export async function requireActiveBrand(r: BoundRepos, userId: string, brandId:
     throw new AppError(
       'payment_required',
       'This brand is paused because your plan allows fewer brands. Upgrade or archive another brand to resume it.',
-      { brandId: brand.id },
+      { brandId: brand.id, reason: 'brand_suspended' },
     )
   }
   return brand

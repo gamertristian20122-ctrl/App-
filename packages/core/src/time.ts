@@ -70,7 +70,10 @@ export function calendarMonthPeriod(at: Date): Period {
 
 /**
  * The usage-metering period for `now`. With a Stripe subscription period that contains `now`
- * we use it; otherwise (trial, no subscription, or a stale/missing period) the UTC calendar month.
+ * we use it. When that period has already ended (the renewal webhook is late or failed) it is
+ * rolled forward from its end with the same length, so a late webhook never opens a fresh
+ * calendar-month allowance next to the Stripe one (Stripe periods are contiguous: the rolled
+ * start is the real next start). Without a period (no subscription) the UTC calendar month.
  */
 export function usagePeriod(now: Date, subscriptionPeriod?: { start: Date | null; end: Date | null } | null): Period {
   const start = subscriptionPeriod?.start
@@ -78,6 +81,11 @@ export function usagePeriod(now: Date, subscriptionPeriod?: { start: Date | null
   if (start && end && start.getTime() < end.getTime()) {
     const period = { start, end }
     if (isWithin(period, now)) return period
+    if (now.getTime() >= end.getTime()) {
+      const length = end.getTime() - start.getTime()
+      const n = Math.floor((now.getTime() - start.getTime()) / length)
+      return { start: new Date(start.getTime() + n * length), end: new Date(start.getTime() + (n + 1) * length) }
+    }
   }
   return calendarMonthPeriod(now)
 }

@@ -53,6 +53,33 @@ describe('transcripts.get', () => {
     await expectAppError(h.s.transcripts.get(userId, { mediaId: media.id, startMs: 5_000, endMs: 1_000 }), 'validation')
   })
 
+  it('keeps the transcript inside the video (e2e: a fake 100 s transcript of a 20 s upload)', async () => {
+    const { userId, brandId } = await tenant(h)
+    const { media } = await h.s.media.registerDriveLink(userId, { brandId, url: 'https://drive.google.com/file/d/short/view', rightsAttested: true })
+    await h.s.media.markIngested(userId, media.id, { durationMs: 20_000, width: 1280, height: 720 })
+    const words = fakeWords(FAKE_TRANSCRIPT_TEXT)
+    expect(words.at(-1)?.e).toBeGreaterThan(60_000)
+    const segments = [
+      { s: 500, e: 9_000, t: 'Inside the video.' },
+      { s: 9_000, e: 20_400, t: 'Runs a little past the end.' },
+      { s: 25_000, e: 40_000, t: 'After the end.' },
+    ]
+    await h.s.transcripts.save(userId, media.id, {
+      engine: 'fake',
+      result: { language: 'en', durationMs: 110_000, text: segments.map((x) => x.t).join(' '), words, segments },
+    })
+    const t = await h.s.transcripts.get(userId, { mediaId: media.id })
+    expect(t.durationMs).toBe(20_000)
+    expect(t.segments).toEqual([
+      { s: 500, e: 9_000, t: 'Inside the video.' },
+      { s: 9_000, e: 20_000, t: 'Runs a little past the end.' },
+    ])
+    expect(t.text).toBe('Inside the video. Runs a little past the end.')
+    const row = await h.s.transcripts.getRow(userId, media.id)
+    expect(row?.words.every((w) => w.s < 20_000 && w.e <= 20_000)).toBe(true)
+    expect(row?.words.length).toBeGreaterThan(10)
+  })
+
   it('reports processing / not a source, and refuses other users', async () => {
     const { userId } = await tenant(h)
     const { media } = await h.s.media.registerDriveLink(userId, { url: 'https://drive.google.com/x', rightsAttested: true })

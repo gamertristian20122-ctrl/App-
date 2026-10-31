@@ -4,7 +4,7 @@
 
 import { createTestAccount, createTestBrand } from '@app/db/testing'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { decideApproval, loadApproval } from '@/lib/server/approve'
+import { decideApproval, loadApproval, setTikTokPrivacy } from '@/lib/server/approve'
 import { createHarness, type Harness } from './harness'
 
 let h: Harness
@@ -78,6 +78,30 @@ describe('/approve/[nonce]', () => {
     expect(await loadApproval(h.rt.services, owner.id, fresh.link)).toMatchObject({ kind: 'invalid', reason: 'stale' })
     expect((await decideApproval(h.rt.services, owner.id, fresh.link, 'approve')).ok).toBe(false)
     expect((await h.rt.services.drafts.get(owner.id, fresh.draftId)).draft.status).toBe('draft')
+  })
+
+  it('sets TikTok privacy from the page and continues with a fresh nonce (e2e regression)', async () => {
+    const brand = await createTestBrand(h.db, owner.id, { name: 'TikTok brand' })
+    await createTestAccount(h.db, owner.id, brand.id, { platform: 'tiktok' })
+    const media = await h.rt.services.media.createUpload(owner.id, { filename: 'a.jpg', contentType: 'image/jpeg', bytes: 1024, brandId: brand.id }, { purpose: 'post', via: 'web' })
+    await h.rt.storage.putBytes(media.media.storageKey, new Uint8Array(1024), 'image/jpeg')
+    await h.rt.services.media.completeUpload(owner.id, media.media.id, {}, { via: 'web' })
+    const view = await h.rt.services.drafts.create(owner.id, { brandId: brand.id, variants: [{ platform: 'tiktok', text: 'Slides', mediaIds: [media.media.id] }] }, { via: 'worker' })
+    const issued = await h.rt.services.approvals.issueNonce(owner.id, view.draft.id, { via: 'mcp' })
+    const link = issued.approveUrl.split('/approve/')[1] as string
+    expect((await decideApproval(h.rt.services, owner.id, link, 'approve')).ok).toBe(false)
+
+    expect(await setTikTokPrivacy(h.rt.services, owner.id, link, 'NOT_A_LEVEL')).toEqual({ ok: false, message: 'Choose who can see the TikTok post.' })
+    const saved = await setTikTokPrivacy(h.rt.services, owner.id, link, 'FOLLOWER_OF_CREATOR')
+    if (!saved.ok) throw new Error(saved.message)
+    expect(saved.nonce).not.toBe(link)
+    // the old link is used up; the new nonce opens the same draft, now approvable
+    expect((await loadApproval(h.rt.services, owner.id, link)).kind).toBe('invalid')
+    const state = await loadApproval(h.rt.services, owner.id, saved.nonce)
+    expect(state.kind === 'review' && state.preview.ready).toBe(true)
+    expect(await decideApproval(h.rt.services, owner.id, saved.nonce, 'approve')).toMatchObject({ ok: true, decision: 'approve' })
+    const stranger = await h.createUser('privacy-stranger@example.com')
+    expect((await setTikTokPrivacy(h.rt.services, stranger.id, saved.nonce, 'SELF_ONLY')).ok).toBe(false)
   })
 
   it('keeps the nonce when the draft cannot be approved yet', async () => {

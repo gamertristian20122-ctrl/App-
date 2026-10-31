@@ -7,7 +7,7 @@ import { validateVariant } from './platforms'
 import type { Clock } from './ports'
 import { DAY_MS, parseTimestampToMs, systemClock } from './time'
 import type { Platform } from './types'
-import { MEDIA_KINDS, PLATFORMS, PlatformSchema, DraftStatusSchema, TimedTextSchema, VOICE_PROFILE_SOURCES } from './types'
+import { MEDIA_KINDS, PLATFORM_LABELS, PLATFORMS, PlatformSchema, DraftStatusSchema, TimedTextSchema, VOICE_PROFILE_SOURCES } from './types'
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -82,6 +82,21 @@ export const TIKTOK_PRIVACY_LEVELS = [
   'FOLLOWER_OF_CREATOR',
   'SELF_ONLY',
 ] as const
+export type TikTokPrivacyLevel = (typeof TIKTOK_PRIVACY_LEVELS)[number]
+
+/**
+ * How the approval UIs name TikTok's privacy levels. TikTok requires the person to pick one
+ * explicitly (no default), so every approval surface offers this choice.
+ */
+export const TIKTOK_PRIVACY_LABELS: Readonly<Record<TikTokPrivacyLevel, string>> = {
+  PUBLIC_TO_EVERYONE: 'Everyone',
+  MUTUAL_FOLLOW_FRIENDS: 'Friends (followers you follow back)',
+  FOLLOWER_OF_CREATOR: 'Followers',
+  SELF_ONLY: 'Only me',
+}
+
+/** The message for an edit that changes nothing (approval card, web queue, services). */
+export const EMPTY_EDIT_MESSAGE = 'Change the text, the title or who can see the TikTok post.'
 
 export const PlatformOptionsSchemas = {
   tiktok: z.strictObject({
@@ -166,6 +181,111 @@ export const PlatformOptionsSchemas = {
 
 export type PlatformOptions<P extends Platform> = z.output<(typeof PlatformOptionsSchemas)[P]>
 
+type OptionKey<P extends Platform> = keyof z.input<(typeof PlatformOptionsSchemas)[P]> & string
+
+/**
+ * How the approval surfaces (card, /approve page, web queue) name every publishable option. The
+ * type forces a label for every key of every options schema, so a new option cannot ship without
+ * being shown to the person who approves it.
+ */
+export const PLATFORM_OPTION_LABELS: { readonly [P in Platform]: Readonly<Record<OptionKey<P>, string>> } = {
+  tiktok: {
+    privacyLevel: 'Who can see',
+    disableComment: 'Comments off',
+    disableDuet: 'Duets off',
+    disableStitch: 'Stitches off',
+    brandContent: 'Paid partnership (branded content)',
+    brandOrganic: 'Promotes own brand',
+    isAiGenerated: 'Labelled AI-generated',
+    coverTimestampMs: 'Cover frame at',
+    firstComment: 'First comment',
+  },
+  youtube: {
+    privacyStatus: 'Visibility',
+    tags: 'Tags',
+    categoryId: 'Category id',
+    madeForKids: 'Made for kids',
+    containsSyntheticMedia: 'Contains synthetic media',
+    playlistId: 'Add to playlist',
+    firstComment: 'First comment',
+  },
+  instagram: {
+    mediaType: 'Post as',
+    shareToFeed: 'Also share to feed',
+    collaborators: 'Collaborators (invited)',
+    thumbOffsetMs: 'Cover frame at',
+    locationId: 'Location id',
+    firstComment: 'First comment',
+  },
+  facebook: {
+    mediaType: 'Post as',
+    pageId: 'Facebook page id',
+    firstComment: 'First comment',
+  },
+  threads: {
+    topicTag: 'Topic tag',
+    replyControl: 'Who can reply',
+    firstComment: 'First comment',
+  },
+  x: {
+    longTextMode: 'Long text',
+    replySettings: 'Who can reply',
+    firstComment: 'First comment',
+  },
+  linkedin: {
+    visibility: 'Visibility',
+    pageId: 'Company page id',
+    firstComment: 'First comment',
+  },
+  pinterest: {
+    boardId: 'Board id',
+    link: 'Pin link',
+    altText: 'Alt text',
+  },
+  bluesky: {
+    altText: 'Alt text',
+    langs: 'Languages',
+    firstComment: 'First comment',
+  },
+}
+
+/** One option of a variant as the approval surfaces show it. */
+export interface OptionLine {
+  key: string
+  label: string
+  value: string
+}
+
+function optionValueText(platform: Platform, key: string, value: unknown): string {
+  if (platform === 'tiktok' && key === 'privacyLevel' && typeof value === 'string' && value in TIKTOK_PRIVACY_LABELS) {
+    return TIKTOK_PRIVACY_LABELS[value as TikTokPrivacyLevel]
+  }
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'number' && key.endsWith('Ms')) return `${(value / 1000).toFixed(1)} s`
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (Array.isArray(value) && value.every((v) => typeof v === 'string' || typeof v === 'number')) return value.join(', ')
+  return JSON.stringify(value) ?? String(value)
+}
+
+/**
+ * Every option a variant publishes with, as label/value lines (labels from
+ * PLATFORM_OPTION_LABELS; unknown keys, e.g. from older rows, are shown by name so nothing that
+ * gets published is ever hidden). Unset (undefined/null) options are skipped.
+ */
+export function describeOptions(platform: Platform, options: Readonly<Record<string, unknown>> | null | undefined): OptionLine[] {
+  if (!options) return []
+  const labels = PLATFORM_OPTION_LABELS[platform] as Readonly<Record<string, string>>
+  const known = Object.keys(labels)
+  const keys = [...known.filter((k) => k in options), ...Object.keys(options).filter((k) => !known.includes(k)).sort()]
+  const lines: OptionLine[] = []
+  for (const key of keys) {
+    const value = options[key]
+    if (value === undefined || value === null) continue
+    lines.push({ key, label: labels[key] ?? key, value: optionValueText(platform, key, value) })
+  }
+  return lines
+}
+
 // ---------------------------------------------------------------------------
 // Drafts
 // ---------------------------------------------------------------------------
@@ -210,7 +330,7 @@ export type VariantInput = z.output<typeof VariantInputSchema>
 function refineVariant(variant: VariantInput, ctx: z.RefinementCtx, path: (string | number)[]): void {
   for (const issue of validateVariant(variant.platform, variant)) {
     if (issue.severity !== 'error') continue
-    ctx.addIssue({ code: 'custom', path: [...path, issue.field], message: `${variant.platform}: ${issue.message}` })
+    ctx.addIssue({ code: 'custom', path: [...path, issue.field], message: `${PLATFORM_LABELS[variant.platform]}: ${issue.message}` })
   }
 }
 
@@ -228,7 +348,7 @@ export const DraftInputSchema = z
         ctx.addIssue({
           code: 'custom',
           path: ['variants', i, 'platform'],
-          message: `Only one ${v.platform} variant per draft.`,
+          message: `Only one ${PLATFORM_LABELS[v.platform]} variant per draft.`,
         })
       }
       seen.add(v.platform)
@@ -243,16 +363,24 @@ export const UpsertVariantInputSchema = z
   .superRefine((input, ctx) => refineVariant(input.variant, ctx, ['variant']))
 export type UpsertVariantInput = z.output<typeof UpsertVariantInputSchema>
 
-/** Quick edit from the approval card / web queue: text and/or title of one variant. */
+/**
+ * Quick edit from the approval card / web queue: the text and/or title of one variant, and for
+ * TikTok who can see the post (privacyLevel, which TikTok requires the person to choose; drafts
+ * made by the worker from clips and renders arrive without it).
+ */
 export const EditVariantInputSchema = z
   .strictObject({
     draftId: IdSchema,
     platform: PlatformSchema,
     text: textSchema(MAX_POST_TEXT).optional(),
     title: lineSchema(0, MAX_TITLE).optional(),
+    privacyLevel: z.enum(TIKTOK_PRIVACY_LEVELS).optional(),
   })
-  .refine((v) => v.text !== undefined || v.title !== undefined, 'Change the text or the title.')
+  .refine((v) => v.text !== undefined || v.title !== undefined || v.privacyLevel !== undefined, EMPTY_EDIT_MESSAGE)
   .superRefine((v, ctx) => {
+    if (v.privacyLevel !== undefined && v.platform !== 'tiktok') {
+      ctx.addIssue({ code: 'custom', path: ['privacyLevel'], message: 'privacyLevel can only be set on the TikTok variant.' })
+    }
     const edited = new Set<string>()
     if (v.text !== undefined) edited.add('text')
     if (v.title !== undefined) edited.add('title')

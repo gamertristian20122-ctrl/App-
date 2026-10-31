@@ -3,6 +3,7 @@
 import { PLATFORM_LABELS } from '@app/core/types'
 import { ConnectAccountInputSchema, ListAccountsInputSchema } from '@app/core/validation'
 import { appUrl, type McpContext } from '../context'
+import { brandWritingBrief } from '../prompts'
 import { listText, ok } from '../results'
 import { accountView, brandView, type AccountRow, type BrandRow } from '../views'
 import { READ_ONLY, type ToolDef } from './types'
@@ -81,7 +82,8 @@ export const listAccounts: ToolDef = {
   title: 'List brands and connected accounts',
   description:
     'Lists the user\'s brands (with their ids and time zones) and the social accounts connected to each brand, with their status (active, pending, needs_reauth). ' +
-    'Call this first to learn brand ids. Accounts that need attention can be reconnected with connect_account.',
+    'Call this first to learn brand ids. Accounts that need attention can be reconnected with connect_account. ' +
+    'With a brandId it also returns that brand\'s writing brief: its voice profile (tone, audience, do/don\'t rules, sample posts), its best past posts and its platform rules. Read it before writing any post for the brand, and before changing the voice profile.',
   input: ListAccountsInputSchema,
   describe: { brandId: 'Only this brand (optional).' },
   annotations: { ...READ_ONLY, openWorldHint: true },
@@ -105,8 +107,16 @@ export const listAccounts: ToolDef = {
       else lines.push(...list.map(accountLine))
     }
     if (stale.length > 0) lines.push(`Could not refresh account status for ${listText(stale)} just now; showing the last known status.`)
+    // one brand asked for (or only one exists): include its writing brief
+    const one = brandId || byBrand.length === 1 ? byBrand[0] : undefined
+    const brief = one
+      ? await brandWritingBrief(ctx, one.brand, one.accounts.filter((a) => a.status === 'active').map((a) => a.platform))
+      : null
+    if (brief) lines.push('', brief.text)
+    else lines.push('Call list_accounts with a brandId for that brand\'s voice profile and writing rules before writing a post.')
     return ok(lines.join('\n'), {
       brands: byBrand.map(({ brand, accounts: list }) => ({ ...brandView(brand), accounts: list.map(accountView) })),
+      ...(brief ? { voiceProfile: brief.voiceProfile } : {}),
     })
   },
 }

@@ -58,6 +58,13 @@ body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 .banner.bad { color: var(--bad); } .banner.ok { color: var(--ok); }
 textarea, input[type="text"] { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
 textarea { min-height: 120px; resize: vertical; }
+select { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; }
+.privacy { margin-top: 10px; }
+.options { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.option { display: flex; gap: 8px; padding: 2px 0; }
+.option dt { color: var(--muted); flex: 0 0 auto; }
+.option dt::after { content: ":"; }
+.option dd { margin: 0; white-space: pre-wrap; word-break: break-word; min-width: 0; }
 label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
 button.btn { font: inherit; border-radius: 8px; padding: 7px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
@@ -269,6 +276,24 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
     });
   }
 
+  // TikTok requires the person to choose who can see each post (no default). Same values and
+  // labels as TIKTOK_PRIVACY_LEVELS / TIKTOK_PRIVACY_LABELS in @app/core/validation.
+  var TIKTOK_PRIVACY = [
+    ['PUBLIC_TO_EVERYONE', 'Everyone'],
+    ['MUTUAL_FOLLOW_FRIENDS', 'Friends (followers you follow back)'],
+    ['FOLLOWER_OF_CREATOR', 'Followers'],
+    ['SELF_ONLY', 'Only me']
+  ];
+
+  function setPrivacy(v, level) {
+    var d = state.preview.draft;
+    if (!level) return;
+    run('approval_edit_variant', { draftId: d.id, nonce: state.nonce, platform: v.platform, privacyLevel: level }, function (result) {
+      applyResult(result);
+      tellModel('The user chose who can see the ' + v.label + ' post of draft ' + d.id + ' in the approval card.');
+    });
+  }
+
   // ---------------------------------------------------------------- rendering helpers
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -322,10 +347,33 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
     }));
   }
 
+  // Everything the variant publishes besides the text (first comment, collaborators, visibility,
+  // page/board/playlist ids...). TikTok's "Who can see" has its own picker below.
+  function optionsList(v) {
+    var lines = (v.optionLines || []).filter(function (l) { return !(v.platform === 'tiktok' && l.key === 'privacyLevel'); });
+    if (lines.length === 0) return null;
+    return el('dl', { class: 'options', 'aria-label': 'Also published with this post' }, lines.map(function (l) {
+      return el('div', { class: 'option' }, [el('dt', { text: l.label }), el('dd', { text: l.value })]);
+    }));
+  }
+
   function accountText(v) {
     if (!v.account) return v.label + ': not connected';
     var name = v.account.handle ? '@' + String(v.account.handle).replace(/^@/, '') : (v.account.displayName || 'account');
     return v.label + ' · ' + name + (v.account.status !== 'active' ? ' (' + v.account.status + ')' : '');
+  }
+
+  function privacyPicker(v) {
+    if (v.platform !== 'tiktok') return null;
+    var current = v.options && typeof v.options.privacyLevel === 'string' ? v.options.privacyLevel : '';
+    var select = el('select', { id: 'tiktok-privacy', disabled: !state.nonce || state.busy });
+    var placeholder = el('option', { value: '', text: 'Choose…', disabled: true });
+    select.appendChild(placeholder);
+    TIKTOK_PRIVACY.forEach(function (p) { select.appendChild(el('option', { value: p[0], text: p[1] })); });
+    select.value = current;
+    if (!current) placeholder.selected = true;
+    select.addEventListener('change', function () { setPrivacy(v, select.value); });
+    return el('div', { class: 'privacy' }, [el('label', { for: 'tiktok-privacy', text: 'Who can see this TikTok post' }), select]);
   }
 
   // ---------------------------------------------------------------- views
@@ -337,6 +385,8 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
       v.title ? el('div', { class: 'title', text: v.title }) : null,
       el('div', { class: 'text', text: v.text || '(no text)' }),
       counter(used, max, v.length && v.length.unit),
+      optionsList(v),
+      privacyPicker(v),
       mediaThumbs(v.media),
       issuesList(v.issues)
     ]);
@@ -377,8 +427,8 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
 
   function statusPill(p) {
     var d = p.draft;
-    if (d.status === 'approved' && d.approvedRevision === d.revision) return el('span', { class: 'pill ok', text: 'Approved' });
-    if (d.status === 'rejected') return el('span', { class: 'pill bad', text: 'Rejected' });
+    if (state.done === 'approved' || (d.status === 'approved' && d.approvedRevision === d.revision)) return el('span', { class: 'pill ok', text: 'Approved' });
+    if (state.done === 'rejected' || d.status === 'rejected') return el('span', { class: 'pill bad', text: 'Rejected' });
     if (!p.ready) return el('span', { class: 'pill warn', text: 'Needs fixes' });
     return el('span', { class: 'pill', text: 'Waiting for approval' });
   }
@@ -454,14 +504,16 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
 
   // ---------------------------------------------------------------- sizing
   var lastHeight = 0;
+  // The card's own height, not the document's: documentElement.scrollHeight is never smaller than
+  // the iframe the host gave us, so the card could grow but never shrink (e.g. after Approve).
   function reportSize() {
     if (bridge !== 'mcp') return;
-    var h = Math.ceil(document.documentElement.scrollHeight);
+    var h = Math.ceil(root.getBoundingClientRect().height);
     if (h === lastHeight) return;
     lastHeight = h;
     notify('ui/notifications/size-changed', { width: Math.ceil(document.documentElement.scrollWidth), height: h });
   }
-  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(reportSize).observe(document.body);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(reportSize).observe(root);
 
   connectMcp();
   readOpenAiGlobals();

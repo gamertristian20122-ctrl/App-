@@ -1,6 +1,7 @@
 // Prompts (our playbook): write_post, pick_clips, weekly_review. They load the user's data through
 // @app/services and return one user message with the rules, so every AI produces the same results.
 
+import { completable } from '@modelcontextprotocol/sdk/server/completable.js'
 import { McpError, ErrorCode, type GetPromptResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { isAppError } from '@app/core/errors'
@@ -8,11 +9,11 @@ import { PLATFORM_RULES, type PlatformRules, type TextUnit } from '@app/core/pla
 import { formatMs } from '@app/core/time'
 import { PLATFORM_LABELS, PlatformSchema, type Platform } from '@app/core/types'
 import { IdSchema, MAX_CLIP_RANGES } from '@app/core/validation'
-import type { VoiceProfileView, VoiceSample, WeeklyReview } from '@app/services'
+import { isClipSource, type VoiceProfileView, type VoiceSample } from '@app/services'
 import type { McpContext } from './context'
-import { GENERIC_ERROR } from './errors'
+import { GENERIC_ERROR, modelMessage } from './errors'
+import { pageSegments, pickClipsRules, WEEKLY_REVIEW_STEPS, weeklyReviewText } from './playbook'
 import { excerpt } from './results'
-import { followersText, metricsText } from './tools/insights'
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -27,7 +28,7 @@ function promptError(error: unknown, ctx: McpContext, prompt: string): McpError 
   if (error instanceof McpError) return error
   if (isAppError(error)) {
     const invalid = error.code === 'validation' || error.code === 'not_found' || error.code === 'bad_request'
-    return new McpError(invalid ? ErrorCode.InvalidParams : ErrorCode.InternalError, error.message)
+    return new McpError(invalid ? ErrorCode.InvalidParams : ErrorCode.InternalError, modelMessage(error))
   }
   ctx.log?.error('mcp prompt crashed', { prompt, err: error instanceof Error ? error : String(error) })
   return new McpError(ErrorCode.InternalError, GENERIC_ERROR)
@@ -37,6 +38,61 @@ function parseId(value: string | undefined, name: string): string {
   const parsed = IdSchema.safeParse(value)
   if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, `${name} must be an id (UUID), e.g. a brandId from list_accounts.`)
   return parsed.data
+}
+
+/**
+ * The brand a prompt is for: an id, a brand name (what the prompt form's completion offers;
+ * case-insensitive), or nothing when the user has exactly one active brand.
+ */
+async function resolveBrandId(ctx: McpContext, value: string | undefined): Promise<string> {
+  const raw = (value ?? '').trim()
+  const asId = IdSchema.safeParse(raw)
+  if (asId.success) return asId.data
+  const brands = await ctx.services.brands.list(ctx.userId, { status: 'active' })
+  if (raw === '') {
+    if (brands.length === 1 && brands[0]) return brands[0].id
+    if (brands.length === 0) throw new McpError(ErrorCode.InvalidParams, 'There is no active brand yet. Create one in the web app first.')
+    throw new McpError(ErrorCode.InvalidParams, `Choose a brand: ${brands.map((b) => `"${b.name}"`).join(', ')}.`)
+  }
+  const matches = brands.filter((b) => b.name.toLowerCase() === raw.toLowerCase())
+  if (matches.length === 1 && matches[0]) return matches[0].id
+  throw new McpError(ErrorCode.InvalidParams, `No single active brand is called "${raw.slice(0, 60)}". Brands: ${brands.map((b) => `"${b.name}"`).join(', ') || 'none'}.`)
+}
+
+/** The source video a prompt is for: an id, or nothing for the newest source video. */
+async function resolveSourceId(ctx: McpContext, value: string | undefined): Promise<string> {
+  const raw = (value ?? '').trim()
+  if (raw !== '') return parseId(raw, 'media_id')
+  const page = await ctx.services.media.list(ctx.userId, { kind: 'video', status: 'ready', limit: 50 })
+  const newest = page.items.find((m) => isClipSource(m))
+  if (!newest) throw new McpError(ErrorCode.InvalidParams, 'There is no source video yet. Upload one on the Media page of the web app first.')
+  return newest.id
+}
+
+/**
+ * An optional, completable prompt argument. The SDK (1.32) looks for the completer on the inner
+ * schema when it registers the prompt but on the outer one when it answers completion/complete,
+ * so both carry it.
+ */
+function optionalCompletable(description: string, complete: (value: string) => Promise<string[]>) {
+  const cb = async (value: string | undefined) => complete((value ?? '').trim().toLowerCase())
+  return completable(completable(z.string(), cb).optional().describe(description), cb)
+}
+
+/** Prompt-form completion: the user's active brand names starting with what was typed. */
+function brandArg(ctx: McpContext) {
+  return optionalCompletable('The brand: its name or id (from list_accounts). Optional when there is one brand.', async (typed) => {
+    const brands = await ctx.services.brands.list(ctx.userId, { status: 'active' }).catch(() => [])
+    return brands.map((b) => b.name).filter((n) => n.toLowerCase().startsWith(typed)).slice(0, 20)
+  })
+}
+
+/** Prompt-form completion: the ids of the user's newest source videos. */
+function sourceArg(ctx: McpContext) {
+  return optionalCompletable('The source video id (from get_transcript without arguments). Default: the newest source video.', async (typed) => {
+    const page = await ctx.services.media.list(ctx.userId, { kind: 'video', status: 'ready', limit: 50 }).catch(() => ({ items: [] }))
+    return page.items.filter((m) => isClipSource(m) && m.id.startsWith(typed)).map((m) => m.id).slice(0, 20)
+  })
 }
 
 function parsePlatforms(value: string | undefined): Platform[] | null {
@@ -105,19 +161,43 @@ function voiceText(voice: VoiceProfileView | null, samples: readonly VoiceSample
   return lines.join('\n')
 }
 
+/**
+ * The brand's writing brief for the model (list_accounts with a brandId): the voice profile, the
+ * best imported posts, and the rules of its connected platforms. The model cannot load the
+ * write_post prompt itself, so this is how the voice reaches every create_draft.
+ */
+export async function brandWritingBrief(ctx: McpContext, brand: { id: string; name: string }, connected: readonly Platform[]) {
+  const [voice, samples] = await Promise.all([
+    ctx.services.voice.get(ctx.userId, brand.id),
+    ctx.services.voice.importedSamples(ctx.userId, brand.id, { limit: 5 }),
+  ])
+  const text = [
+    `## Writing for "${brand.name}": read this before every create_draft`,
+    voiceText(voice, samples),
+    ...(connected.length > 0 ? ['Platform rules (hard limits; stay well under them):', ...connected.map((p) => platformRulesText(PLATFORM_RULES[p]))] : []),
+    'Write one variant per platform (hook first, one idea, a clear call to action), use only facts the user gave you, and follow the voice above.',
+    voice
+      ? 'save_voice_profile replaces the whole profile: to change one rule, send the full profile above with your change (structuredContent.voiceProfile.profile).'
+      : 'To save a voice profile, call save_voice_profile with the full profile.',
+  ].join('\n')
+  return { text, voiceProfile: voice ? { version: voice.version, source: voice.source, profile: voice.profile } : null }
+}
+
 // ---------------------------------------------------------------------------------------------
 // write_post
 // ---------------------------------------------------------------------------------------------
 
-export const WritePostArgs = {
-  brand_id: z.string().describe('The brand id (from list_accounts).'),
-  topic: z.string().describe('What the post is about (and any facts, links or offers to include).'),
-  platforms: z.string().optional().describe('Comma-separated platforms, e.g. "instagram, linkedin, x". Default: the brand\'s connected accounts.'),
+export function writePostArgs(ctx: McpContext) {
+  return {
+    brand_id: brandArg(ctx),
+    topic: z.string().describe('What the post is about (and any facts, links or offers to include).'),
+    platforms: z.string().optional().describe('Comma-separated platforms, e.g. "instagram, linkedin, x". Default: the brand\'s connected accounts.'),
+  }
 }
 
-export async function writePostPrompt(ctx: McpContext, args: { brand_id: string; topic: string; platforms?: string | undefined }): Promise<GetPromptResult> {
+export async function writePostPrompt(ctx: McpContext, args: { brand_id?: string | undefined; topic: string; platforms?: string | undefined }): Promise<GetPromptResult> {
   try {
-    const brandId = parseId(args.brand_id, 'brand_id')
+    const brandId = await resolveBrandId(ctx, args.brand_id)
     const topic = args.topic.trim().slice(0, 4_000)
     if (!topic) throw new McpError(ErrorCode.InvalidParams, 'topic must not be empty.')
     const requested = parsePlatforms(args.platforms)
@@ -169,40 +249,36 @@ export async function writePostPrompt(ctx: McpContext, args: { brand_id: string;
 // pick_clips
 // ---------------------------------------------------------------------------------------------
 
-export const PickClipsArgs = {
-  media_id: z.string().describe('The source video id (from get_transcript without arguments).'),
-  count: z.string().optional().describe('How many clips to suggest (default 5, at most 20).'),
+export function pickClipsArgs(ctx: McpContext) {
+  return {
+    media_id: sourceArg(ctx),
+    count: z.string().optional().describe('How many clips to suggest (default 5, at most 20).'),
+  }
 }
 
-export async function pickClipsPrompt(ctx: McpContext, args: { media_id: string; count?: string | undefined }): Promise<GetPromptResult> {
+export async function pickClipsPrompt(ctx: McpContext, args: { media_id?: string | undefined; count?: string | undefined }): Promise<GetPromptResult> {
   try {
-    const mediaId = parseId(args.media_id, 'media_id')
+    const mediaId = await resolveSourceId(ctx, args.media_id)
     const count = Math.min(MAX_CLIP_RANGES, Math.max(1, Number.parseInt(args.count ?? '5', 10) || 5))
     const t = await ctx.services.transcripts.get(ctx.userId, { mediaId })
     const header = [
       `Pick the best ${count} short clips from video ${mediaId}${t.durationMs ? ` (${formatMs(t.durationMs)} long)` : ''} for TikTok, Reels and Shorts.`,
       '',
-      '## What makes a good clip',
-      '- Standalone: it makes sense to someone who has not seen the rest of the video. No "as I said", no unexplained "this/that/he", no references to slides or earlier parts.',
-      '- Hook in the first 3 seconds: a surprising claim, a strong question, a bold opinion, a number, or the payoff stated up front. Start right on that sentence, not on filler ("so", "um", "yeah").',
-      '- One complete thought with a payoff: it ends right after the point lands (punchline, answer, takeaway), not mid-sentence.',
-      '- 20–90 seconds long (never under 3 s or over 180 s). Shorter is better when the thought is complete.',
-      '- Prefer emotion, surprise, practical value, a story with a turn, or a contrarian take. Skip intros, outros, sponsor reads and housekeeping.',
-      '- Clips must not overlap; spread them across the video.',
-      '',
-      '## How to cut',
-      '1. Choose ranges from the segment timestamps below (milliseconds). For a precise cut, call get_transcript with { mediaId, startMs, endMs } around the moment to see word timings; start at the first word of the hook (minus ~150 ms) and end just after the last word of the payoff (plus ~300 ms).',
-      `2. Show the user your picks (time range, a title of at most 100 characters, the hook line) and why each works. Let them drop or adjust any.`,
-      `3. Then call make_clips { mediaId: "${mediaId}", ranges: [{ startMs, endMs, title, hook }], captionStyle?: "bold" | "minimal" | "karaoke" | "none" } with at most ${MAX_CLIP_RANGES} ranges.`,
-      '4. Each rendered clip becomes a draft. The user approves it in the approval card (approve_draft) before anything is scheduled. Never schedule without approval.',
+      ...pickClipsRules(mediaId),
       '',
     ]
     if (t.status !== 'ready') {
       return userMessage('Pick clips (transcript not ready)', [...header, `The transcript is not available: ${t.status}. ${t.message ?? ''}`.trim(), 'Tell the user and try again later.'].join('\n'))
     }
-    const segments = t.segments.map((s) => `[${s.s}–${s.e} ms | ${formatMs(s.s)}–${formatMs(s.e)}] ${s.t}`)
-    const body = ['## Transcript segments', ...segments]
-    if (t.message) body.push('', t.message)
+    // a long transcript is paged like get_transcript (a 4-hour video would not fit any context)
+    const page = pageSegments(t.segments)
+    const body = ['## Transcript segments', ...page.lines]
+    if (page.nextStartMs !== null) {
+      body.push(
+        '',
+        `The transcript continues after ${formatMs(page.nextStartMs)}: call get_transcript { mediaId: "${mediaId}", startMs: ${page.nextStartMs} } to read the rest before choosing.`,
+      )
+    }
     return userMessage(`Pick clips from video ${mediaId}`, [...header, ...body].join('\n'))
   } catch (error) {
     throw promptError(error, ctx, 'pick_clips')
@@ -213,61 +289,20 @@ export async function pickClipsPrompt(ctx: McpContext, args: { media_id: string;
 // weekly_review
 // ---------------------------------------------------------------------------------------------
 
-export const WeeklyReviewArgs = {
-  brand_id: z.string().describe('The brand id (from list_accounts).'),
+export function weeklyReviewArgs(ctx: McpContext) {
+  return { brand_id: brandArg(ctx) }
 }
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-function pct(v: number | null | undefined): string {
-  if (v === null || v === undefined) return 'n/a'
-  return `${v >= 0 ? '+' : ''}${Math.round(v * 10) / 10}%`
-}
-
-export function weeklyReviewText(r: WeeklyReview): string {
-  const lines: string[] = []
-  const day = (d: Date) => d.toISOString().slice(0, 10)
-  lines.push(`## Last 7 days (${day(r.current.from)} to ${day(r.current.to)}) vs the previous 7 days`)
-  lines.push(`- Posts: ${r.current.posts} (previous ${r.previous.posts}, ${pct(r.change.posts)})`)
-  lines.push(`- This week: ${metricsText(r.current.metrics)}`)
-  lines.push(`- Previous week: ${metricsText(r.previous.metrics)}`)
-  const changes = Object.entries(r.change)
-    .filter(([k]) => k !== 'posts')
-    .map(([k, v]) => `${k} ${pct(v)}`)
-  if (changes.length > 0) lines.push(`- Change: ${changes.join(', ')}`)
-  const byPlatform = Object.entries(r.current.byPlatform)
-  if (byPlatform.length > 0) {
-    lines.push('- By platform this week:')
-    for (const [p, v] of byPlatform) if (v) lines.push(`  - ${PLATFORM_LABELS[p as Platform]}: ${v.posts} posts; ${metricsText(v.metrics)}`)
-  }
-  lines.push(`- Followers: ${followersText(r.followers)}`)
-  const postLine = (p: WeeklyReview['topPosts'][number]) =>
-    `  - ${PLATFORM_LABELS[p.platform]}, ${p.publishedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC: "${excerpt(p.excerpt, 120)}" (${metricsText(p.metrics)}, score ${Math.round(p.score)})`
-  if (r.topPosts.length > 0) lines.push('- Top posts:', ...r.topPosts.map(postLine))
-  if (r.bottomPosts.length > 0) lines.push('- Weakest posts:', ...r.bottomPosts.map(postLine))
-  const days = r.cadence.byWeekday.map((c, i) => (c > 0 ? `${WEEKDAYS[i]} ${c}` : null)).filter(Boolean)
-  const hours = r.cadence.byHour.map((c, h) => (c > 0 ? `${String(h).padStart(2, '0')}:00 ${c}` : null)).filter(Boolean)
-  lines.push(`- Posting days (${r.brand.timezone}): ${days.length > 0 ? days.join(', ') : 'none'}; hours: ${hours.length > 0 ? hours.join(', ') : 'none'}`)
-  lines.push(`- Pipeline: ${r.upcoming.scheduled} scheduled, ${r.upcoming.drafts} drafts waiting for approval`)
-  lines.push(`- Voice profile: ${r.voiceProfileVersion === null ? 'none yet' : `version ${r.voiceProfileVersion}`}; imported past posts: ${r.importedPosts}`)
-  return lines.join('\n')
-}
-
-export async function weeklyReviewPrompt(ctx: McpContext, args: { brand_id: string }): Promise<GetPromptResult> {
+export async function weeklyReviewPrompt(ctx: McpContext, args: { brand_id?: string | undefined }): Promise<GetPromptResult> {
   try {
-    const brandId = parseId(args.brand_id, 'brand_id')
+    const brandId = await resolveBrandId(ctx, args.brand_id)
     const review = await ctx.services.analytics.weeklyReview(ctx.userId, brandId)
     const text = [
       `Run the weekly review for the brand "${review.brand.name}" (brandId ${review.brand.id}). Data as of ${review.generatedAt.toISOString()}:`,
       '',
       weeklyReviewText(review),
       '',
-      '## What to do',
-      '1. Summarise in 3–5 bullets what worked and what did not, citing the numbers above (compare with the previous week). Say so when there is too little data to conclude anything.',
-      '2. Propose exactly 3 concrete experiments for next week. For each: the hypothesis, the exact change (format, hook style, topic, posting day/time, platform, length), how many posts, and the metric that decides success.',
-      '3. For each experiment, suggest 1–2 draft posts (per platform text) in the brand voice (load the write_post prompt or use the voice profile).',
-      '4. Ask the user which experiments to run. Only then save the posts with create_draft and show each with approve_draft. Never schedule anything the user has not approved.',
-      '5. If posts or analytics are missing, suggest import_past_posts or connecting accounts instead of guessing.',
+      ...WEEKLY_REVIEW_STEPS,
     ].join('\n')
     return userMessage(`Weekly review for ${review.brand.name}`, text)
   } catch (error) {
@@ -276,3 +311,5 @@ export async function weeklyReviewPrompt(ctx: McpContext, args: { brand_id: stri
 }
 
 export const PROMPT_NAMES = ['write_post', 'pick_clips', 'weekly_review'] as const
+
+export { WEEKLY_REVIEW_STEPS, weeklyReviewText } from './playbook'

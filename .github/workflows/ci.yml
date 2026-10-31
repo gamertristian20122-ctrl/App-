@@ -1,0 +1,90 @@
+# Continuous integration: the same checks the repo is handed over with (see README.md, "Tests").
+# Runs on every push and every pull request. Nothing here talks to a live service: every external
+# API is mocked in the tests, and the real-Postgres step uses a throwaway Postgres 16 container.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    services:
+      # Throwaway Postgres for `pnpm test:pg` (db + services suites on a real server: row locks,
+      # SKIP LOCKED, concurrent reservations). Supabase runs Postgres 15/17; 16 is in between.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # pnpm version comes from "packageManager" in package.json (pnpm@10.28.0).
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The worker's media tests run real ffmpeg (clip cuts, captions, template videos).
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Optional for the suite (the Chromium tests skip without it), installed so the carousel
+      # renderer is tested with a real browser. Same Chromium build as the worker's Docker image.
+      - name: Install Chromium for the carousel renderer tests
+        run: pnpm --filter @app/worker exec playwright-core install --with-deps chromium
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint (architecture boundaries)
+        run: pnpm lint
+
+      - name: Tests (PGlite, all packages)
+        run: pnpm test
+
+      # scripts/test-postgres.mjs sets TEST_DATABASE_URL and APP_DB_TEST_POSTGRES_URL from
+      # TEST_PG_URL; both are set here as well so the intent is visible.
+      - name: Tests on real Postgres 16 (db + services)
+        env:
+          TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: pnpm test:pg
+
+      - name: Build the web app
+        run: pnpm --filter @app/web build

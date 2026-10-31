@@ -58,8 +58,16 @@ function outputId(jobId: string, what: string): string {
   return uuidV5(`render:${jobId}:${what}`)
 }
 
+/**
+ * Post text from slide text: keeps the line breaks between heading and body (collapsing them ran
+ * "Heading Body" together into one sentence), tidies other whitespace, at most `max` characters.
+ */
 function summary(text: string, max: number): string {
-  return [...text.replace(/\s+/g, ' ').trim()].slice(0, max).join('')
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  return [...lines.join('\n')].slice(0, max).join('').trim()
 }
 
 async function draftFor(ctx: WorkerContext, userId: string, brandId: string, media: MediaView[], kind: 'photos' | 'video', firstText: string, label: string): Promise<RenderDraftResult> {
@@ -71,7 +79,7 @@ async function draftFor(ctx: WorkerContext, userId: string, brandId: string, med
       kind,
       text,
       title: summary(firstText.split('\n')[0] ?? '', 100) || label,
-      notes: text ? `${label}: ${text}` : label,
+      notes: text ? `${label}: ${text.replace(/\s+/g, ' ')}` : label,
     })
   } catch (error) {
     // the media are recorded; a refused draft (brand archived, account on hold...) must not lose them

@@ -198,17 +198,24 @@ describe('consent (/oauth/authorize)', () => {
     expect(state.kind).toBe('error')
   })
 
-  it('redirects protocol errors back to the client (plain PKCE, wrong resource)', async () => {
+  it('shows protocol errors with a click-through link back to the client, never an automatic redirect (review: open redirect via DCR)', async () => {
     const { body } = await registerClient()
     let state = await loadConsent(h.rt.services, user, await authorizeParams(body.client_id as string, pkce().challenge, { code_challenge_method: 'plain' }))
-    expect(state.kind).toBe('redirect')
-    let url = new URL((state as { url: string }).url)
+    expect(state.kind).toBe('error')
+    if (state.kind !== 'error') return
+    expect(state.message).toMatch(/S256/)
+    expect(state.returnTo?.host).toBe(new URL(REDIRECT).host)
+    let url = new URL(state.returnTo?.url ?? '')
     expect(url.origin + url.pathname).toBe(REDIRECT)
     expect(url.searchParams.get('error')).toBe('invalid_request')
     expect(url.searchParams.get('state')).toBe('xyz-state')
     state = await loadConsent(h.rt.services, user, await authorizeParams(body.client_id as string, pkce().challenge, { resource: 'https://other.example/mcp' }))
-    url = new URL((state as { url: string }).url)
+    expect(state.kind).toBe('error')
+    url = new URL((state as { returnTo: { url: string } }).returnTo.url)
     expect(url.searchParams.get('error')).toBe('invalid_target')
+    // signed out too: an attacker-registered client cannot bounce visitors off our domain
+    state = await loadConsent(h.rt.services, null, await authorizeParams(body.client_id as string, pkce().challenge, { response_type: 'token' }))
+    expect(state.kind).toBe('error')
   })
 
   it('deny returns access_denied with state and iss', async () => {
@@ -232,6 +239,15 @@ describe('consent (/oauth/authorize)', () => {
 
 describe('POST /oauth/token', () => {
   it('exchanges a code with PKCE, rotates refresh tokens and detects reuse', async () => {
+    const used = await getCode()
+    const res0 = await tokenRequest({ grant_type: 'authorization_code', code: used.code, code_verifier: used.verifier, client_id: used.clientId })
+    const replayed = await readJson<{ refresh_token: string }>(res0)
+    // the code is single-use, and a second redemption revokes what the first one issued
+    const again = await tokenRequest({ grant_type: 'authorization_code', code: used.code, code_verifier: used.verifier, client_id: used.clientId })
+    expect(again.status).toBe(400)
+    expect((await readJson(again)).error).toBe('invalid_grant')
+    expect((await tokenRequest({ grant_type: 'refresh_token', refresh_token: replayed.refresh_token, client_id: used.clientId })).status).toBe(400)
+
     const { clientId, verifier, code } = await getCode()
     const res = await tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: clientId, redirect_uri: REDIRECT, resource: RESOURCE })
     expect(res.status).toBe(200)
@@ -239,11 +255,6 @@ describe('POST /oauth/token', () => {
     const first = await readJson<{ access_token: string; refresh_token: string; token_type: string; expires_in: number; scope: string }>(res)
     expect(first).toMatchObject({ token_type: 'Bearer', scope: 'social' })
     expect(first.expires_in).toBeGreaterThan(0)
-
-    // the code is single-use
-    const again = await tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: clientId })
-    expect(again.status).toBe(400)
-    expect((await readJson(again)).error).toBe('invalid_grant')
 
     // refresh → new pair; the old refresh token is rotated out
     const refreshed = await tokenRequest({ grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: clientId })

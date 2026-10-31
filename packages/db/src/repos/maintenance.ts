@@ -57,29 +57,71 @@ export function pruneFinishedJobs(db: Db, before: Date): Promise<number> {
 /**
  * Clip sources (uploaded / drive-linked videos with the rights attestation) created before
  * `createdBefore` whose files still exist. Post videos (no attestation) are never returned, so they
- * cannot fill the batch and starve the retention cleanup.
+ * cannot fill the batch and starve the retention cleanup. A source that a live draft (draft or
+ * approved) attaches as post media, or that a scheduled / publishing post will publish, is kept
+ * (it counts toward the storage allowance) until that draft or post is done.
  */
 export async function listStaleSourceMedia(db: Db, createdBefore: Date, limit = 100): Promise<MediaRow[]> {
   const rows = await db.query(
-    `select * from public.media_assets
-      where origin in ('upload', 'drive_link') and kind = 'video' and status <> 'deleted'
-        and rights_attested_at is not null
-        and created_at < $1::timestamptz
-      order by created_at
+    `select m.* from public.media_assets m
+      where m.origin in ('upload', 'drive_link') and m.kind = 'video' and m.status <> 'deleted'
+        and m.rights_attested_at is not null
+        and m.created_at < $1::timestamptz
+        and not exists (
+          select 1 from public.draft_variants v
+            join public.drafts d on d.id = v.draft_id and d.user_id = v.user_id
+           where v.user_id = m.user_id and m.id = any(v.media_ids) and d.status in ('draft', 'approved'))
+        and not exists (
+          select 1 from public.posts p
+            join public.draft_variants v on v.id = p.variant_id and v.user_id = p.user_id
+           where p.user_id = m.user_id and p.status in ('scheduled', 'publishing') and m.id = any(v.media_ids))
+      order by m.created_at
       limit $2`,
     [createdBefore, Math.max(1, Math.min(1000, limit))],
   )
   return rows.map(mapMedia)
 }
 
-/** Scheduled posts due at or before `now` (a sweeper in case a publish job was lost). */
+/**
+ * Scheduled posts due at or before `now` that no live publish_post job (queued, running, or
+ * failed awaiting a retry) refers to: their job was lost. Posts that have a live job (including
+ * held ones waiting for their next check) are skipped, so they can never fill the batch and starve
+ * the sweep.
+ */
 export async function listDuePosts(db: Db, now: Date, limit = 100): Promise<PostRow[]> {
   const rows = await db.query(
-    `select * from public.posts where status = 'scheduled' and scheduled_for <= $1::timestamptz
-      order by scheduled_for limit $2`,
+    `select p.* from public.posts p
+      where p.status = 'scheduled' and p.scheduled_for <= $1::timestamptz
+        and not exists (
+          select 1 from public.jobs j
+           where j.type = 'publish_post'
+             and j.status in ('queued', 'running', 'failed')
+             and j.payload->>'postId' = p.id::text)
+      order by p.scheduled_for limit $2`,
     [now, Math.max(1, Math.min(1000, limit))],
   )
   return camelRows<PostRow>(rows)
+}
+
+/**
+ * Clips still `queued` or `rendering` whose clip_render job is dead or gone (a worker was killed on
+ * every attempt): nothing would ever finish or fail them.
+ */
+export async function listOrphanedClips(db: Db, updatedBefore: Date, limit = 100): Promise<Array<{ userId: string; clipId: string }>> {
+  const rows = await db.query<{ user_id: string; id: string }>(
+    `select c.user_id, c.id from public.clips c
+      where c.status in ('queued', 'rendering')
+        and c.updated_at < $1::timestamptz
+        and not exists (
+          select 1 from public.jobs j
+           where j.type = 'clip_render'
+             and j.status in ('queued', 'running', 'failed')
+             and j.payload->>'clipId' = c.id::text)
+      order by c.updated_at
+      limit $2`,
+    [updatedBefore, Math.max(1, Math.min(1000, limit))],
+  )
+  return rows.map((r) => ({ userId: r.user_id, clipId: r.id }))
 }
 
 /**

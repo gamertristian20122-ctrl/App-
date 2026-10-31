@@ -74,7 +74,7 @@ export function BillingView({ data, notice }: { data: BillingData; notice: Check
                 display={`${formatClipHours(data.clip.used)} of ${formatClipHours(data.clip.limit)}`}
                 hint="Counted once per source video. Failed uploads and transcriptions are refunded."
               />
-              <Meter label="Active brands" used={data.brandsActive} limit={ent.brands} display={`${data.brandsActive} of ${ent.brands}`} />
+              <Meter label="Active brands" kind="slots" used={data.brandsActive} limit={ent.brands} display={`${data.brandsActive} of ${ent.brands}`} />
               <p className="text-xs text-neutral-500">
                 Limits: {plural(ent.brands, 'brand')}, {formatClipHours(ent.clipSeconds)} of clipping a month.
                 {ent.status === 'past_due' ? ' Clipping and rendering are paused until payment succeeds.' : ''}

@@ -36,7 +36,7 @@ import {
 } from './context'
 import { requireCanCreate, requireCanProcessMedia, userEntitlements } from './entitlements'
 import { enqueueJob } from './jobs'
-import { clipReserveKey, releaseIn, reserveIn } from './usage'
+import { balanceIn, clipReserveKey, releaseIn, reserveIn } from './usage'
 
 /** A media row as shown to users and AI clients: the drive share link (a capability) is never echoed. */
 export type MediaView = Omit<MediaRow, 'sourceUrl'>
@@ -126,6 +126,13 @@ export function createMediaService(ctx: Ctx) {
       meta: { reason: message.slice(0, 300) },
     })
     return row ?? media
+  }
+
+  /** Best effort: removes the file of a media row that failed (the row stays for lineage). */
+  async function deleteStored(media: MediaRow): Promise<void> {
+    await ctx.storage.delete(media.storageKey).catch((error: unknown) => {
+      ctx.log.warn('could not delete a failed media file', { mediaId: media.id, error: errorMessage(error) })
+    })
   }
 
   return withErrors({
@@ -288,6 +295,31 @@ export function createMediaService(ctx: Ctx) {
         requireCanCreate(ent)
         requireCanProcessMedia(ent)
         if (data.brandId) await requireActiveBrand(r, uid, data.brandId)
+        // Refuse before the worker downloads anything (the size and length are unknown until then).
+        const clip = await balanceIn(r, uid, ent, 'clip_seconds')
+        if (clip.remaining <= 0) {
+          throw new AppError('limit_exceeded', 'No clipping time is left this period, so this video cannot be added.', {
+            meter: 'clip_seconds',
+            remaining: 0,
+            limit: clip.limit,
+            periodEnd: clip.period.end.toISOString(),
+          })
+        }
+        const stored = await r.media.storageBytes(uid)
+        if (stored >= ent.storageBytes) {
+          throw new AppError('limit_exceeded', 'Your storage is full. Delete old media to make room.', {
+            limit: ent.storageBytes,
+            used: stored,
+            remaining: 0,
+          })
+        }
+        const pending = await r.media.list(uid, { origin: 'drive_link', status: 'pending', limit: ctx.config.maxPendingDriveLinks })
+        if (pending.length >= ctx.config.maxPendingDriveLinks) {
+          throw new AppError('limit_exceeded', `${pending.length} links are still being downloaded. Wait until they are done, then add more.`, {
+            pending: pending.length,
+            limit: ctx.config.maxPendingDriveLinks,
+          })
+        }
         const row = await r.media.create(uid, {
           brandId: data.brandId ?? null,
           kind: 'video',
@@ -400,6 +432,8 @@ export function createMediaService(ctx: Ctx) {
       const bytes = data.bytes ?? media.bytes
       const refuse = async (message: string): Promise<IngestResult> => {
         const row = await ctx.tx((r) => failIn(r, uid, media, message, 'worker'))
+        // a refused file is never used: do not keep it in storage for the retention period
+        await deleteStored(media)
         return { media: mediaView(row), transcribe: false, error: message }
       }
       if (media.kind === 'video' || media.kind === 'audio') {
@@ -411,6 +445,19 @@ export function createMediaService(ctx: Ctx) {
       const clipSource = isClipSource(media)
       try {
         return await ctx.tx(async (r) => {
+          // storage allowance with the real size (drive links were unknown at registration)
+          const user = await requireUser(r, uid, true)
+          const ent = userEntitlements(user, ctx.now())
+          if (bytes !== null && bytes !== undefined) {
+            const others = (await r.media.storageBytes(uid)) - (media.bytes ?? 0)
+            if (others + bytes > ent.storageBytes) {
+              throw new AppError('limit_exceeded', 'Your storage is full. Delete old media to make room.', {
+                limit: ent.storageBytes,
+                used: others,
+                requested: bytes,
+              })
+            }
+          }
           if (clipSource) {
             await reserveIn(ctx, r, uid, {
               meter: 'clip_seconds',
@@ -459,7 +506,9 @@ export function createMediaService(ctx: Ctx) {
     async markFailed(userId: string, mediaId: string, error: unknown): Promise<MediaView> {
       const uid = userIdOf(userId)
       const media = await requireMedia(ctx.repos, uid, mediaId)
+      if (media.status === 'ready' || media.status === 'deleted') return mediaView(media)
       const row = await ctx.tx((r) => failIn(r, uid, media, errorMessage(error, 'Processing failed.'), 'worker'))
+      await deleteStored(media)
       return mediaView(row)
     },
   })

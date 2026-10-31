@@ -107,6 +107,7 @@ export function previewView(p: DraftPreview) {
       text: v.text,
       title: v.title,
       options: v.options,
+      optionLines: v.optionLines,
       account: v.account,
       ready: v.ready,
       length: v.length,

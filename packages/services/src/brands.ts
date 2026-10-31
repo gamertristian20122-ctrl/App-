@@ -10,6 +10,7 @@ import type { BoundRepos, BrandRow } from '@app/db'
 import { auditIn } from './audit'
 import { conflict, errorMessage, fromZod, requireBrand, requireUser, userIdOf, withErrors, type Ctx } from './context'
 import { requireCanCreate, userEntitlements } from './entitlements'
+import { requeueHeldPostsIn } from './posts'
 
 export interface BrandLimitChange {
   suspended: BrandRow[]
@@ -46,6 +47,8 @@ export async function reconcileBrandLimitIn(ctx: Ctx, r: BoundRepos, userId: str
   }
   for (const b of restored) {
     await auditIn(r, userId, { actor, action: 'brand.restored', subjectType: 'brand', subjectId: b.id, meta: { limit: ent.brands } })
+    // its posts were held while it was paused: publish the due ones now
+    await requeueHeldPostsIn(r, userId, ctx.now(), b.id)
   }
   return { suspended, restored, limit: ent.brands }
 }
@@ -193,6 +196,7 @@ export function createBrandsService(ctx: Ctx) {
         const row = await r.brands.setStatus(uid, brand.id, 'active')
         if (!row) throw conflict('The brand could not be restored.')
         await auditIn(r, uid, { actor: options.via ?? 'web', action: 'brand.restored', subjectType: 'brand', subjectId: brand.id })
+        if (brand.status === 'suspended') await requeueHeldPostsIn(r, uid, ctx.now(), brand.id)
         return row
       })
     },

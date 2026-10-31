@@ -2,8 +2,8 @@
 // the gates every write path uses (canCreate / canProcessMedia / canPublish).
 
 import { AppError } from '@app/core/errors'
-import { entitlements as planEntitlements, type Entitlements } from '@app/core/plans'
-import { usagePeriod, type Period } from '@app/core/time'
+import { entitlements as planEntitlements, TRIAL, type Entitlements } from '@app/core/plans'
+import { DAY_MS, isWithin, usagePeriod, type Period } from '@app/core/time'
 import type { SubscriptionStatus } from '@app/core/types'
 import type { UserRow } from '@app/db'
 
@@ -34,13 +34,26 @@ export function effectiveStatus(user: Pick<UserRow, 'subscriptionStatus' | 'tria
   return user.subscriptionStatus
 }
 
+/**
+ * The metering period: the Stripe period (rolled forward when stale); an in-app trial (no Stripe
+ * subscription) meters over the trial itself, so a trial that crosses the 1st of a month does not
+ * get a second allowance; otherwise the UTC calendar month.
+ */
+export function periodFor(user: Pick<UserRow, 'subscriptionStatus' | 'trialEndsAt' | 'stripeSubscriptionId' | 'currentPeriodStart' | 'currentPeriodEnd'>, now: Date): Period {
+  if (user.subscriptionStatus === 'trialing' && !user.stripeSubscriptionId && user.trialEndsAt && !user.currentPeriodStart) {
+    const trial = { start: new Date(user.trialEndsAt.getTime() - TRIAL.days * DAY_MS), end: user.trialEndsAt }
+    if (isWithin(trial, now)) return trial
+  }
+  return usagePeriod(now, { start: user.currentPeriodStart, end: user.currentPeriodEnd })
+}
+
 export function userEntitlements(user: UserRow, now: Date): UserEntitlements {
   const status = effectiveStatus(user, now)
   const addOns = { extraBrands: user.extraBrands, extraClipHours: user.extraClipHours }
   const base = planEntitlements(user.plan, addOns, status)
   return {
     ...base,
-    period: usagePeriod(now, { start: user.currentPeriodStart, end: user.currentPeriodEnd }),
+    period: periodFor(user, now),
     trialEndsAt: user.trialEndsAt,
     trialExpired: user.subscriptionStatus === 'trialing' && status === 'none',
     addOns,
@@ -63,7 +76,7 @@ function holdMessage(ent: UserEntitlements): string {
 
 /** New drafts, approvals, scheduling, brands, connections, imports. */
 export function requireCanCreate(ent: UserEntitlements): void {
-  if (!ent.canCreate) throw new AppError('payment_required', holdMessage(ent), { status: ent.status })
+  if (!ent.canCreate) throw new AppError('payment_required', holdMessage(ent), { status: ent.status, ...(ent.trialExpired ? { reason: 'trial_ended' } : {}) })
 }
 
 /** New clipping, transcription and rendering (blocked while past_due too). */
@@ -73,6 +86,6 @@ export function requireCanProcessMedia(ent: UserEntitlements): void {
       ent.status === 'past_due'
         ? 'Clipping and rendering are paused until your payment method is updated.'
         : holdMessage(ent)
-    throw new AppError('payment_required', message, { status: ent.status })
+    throw new AppError('payment_required', message, { status: ent.status, ...(ent.trialExpired ? { reason: 'trial_ended' } : {}) })
   }
 }

@@ -9,6 +9,7 @@ import { AccountStatusSchema, PLATFORMS, type AccountStatus, type Platform } fro
 import type { AccountRow } from '@app/db'
 import type { AccountsService } from './accounts'
 import { auditIn } from './audit'
+import type { ClipsService } from './clips'
 import { errorMessage, fromZod, withErrors, type Ctx } from './context'
 import { isClipSource } from './media'
 import type { PostsService } from './posts'
@@ -29,7 +30,12 @@ export interface CleanupResult {
   releasedReservations: number
   /** Registered OAuth clients that never got (or no longer hold) a code or token. */
   deletedOAuthClients: number
+  /** Clips stuck queued/rendering whose clip_render job died: failed so they can be retried. */
+  failedClips: number
 }
+
+/** A queued/rendering clip whose render job is gone for this long is failed by cleanup. */
+export const ORPHAN_CLIP_AFTER_MS = 30 * 60_000
 
 /** A reservation without a transcript for this long is released (a late transcript still settles it). */
 export const ORPHAN_RESERVATION_AFTER_MS = 2 * DAY_MS
@@ -40,7 +46,7 @@ const ProviderStatusSchema = z.object({
   status: AccountStatusSchema,
 })
 
-export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsService; posts: PostsService }) {
+export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsService; posts: PostsService; clips: ClipsService }) {
   return withErrors({
     /**
      * The `cleanup` job: expired nonces / OAuth codes / tokens, old finished jobs, clip-source
@@ -83,6 +89,18 @@ export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsSer
       const duePostsQueued = await deps.posts.enqueueDue(now)
       const stuckPublishing = await deps.posts.recoverStuckPublishing(now)
 
+      // Clips whose clip_render job died (e.g. the container was killed on every attempt): fail
+      // them so they stop holding one of the source's clip slots and can be requested again.
+      let failedClips = 0
+      for (const orphan of await r.maintenance.listOrphanedClips(addMs(now, -ORPHAN_CLIP_AFTER_MS))) {
+        try {
+          const clip = await deps.clips.failRender(orphan.userId, orphan.clipId, new Error('Rendering stopped and could not be finished. Ask for this clip again.'))
+          if (clip.status === 'failed') failedClips += 1
+        } catch (error) {
+          ctx.log.warn('orphaned clip cleanup failed', { clipId: orphan.clipId, error: errorMessage(error) })
+        }
+      }
+
       // Auto-refund: sources whose transcription will never finish (media failed/deleted, the
       // transcribe job died without reporting, or no transcript after a grace period).
       let releasedReservations = 0
@@ -123,6 +141,7 @@ export function createMaintenanceService(ctx: Ctx, deps: { accounts: AccountsSer
         stuckPublishing,
         releasedReservations,
         deletedOAuthClients,
+        failedClips,
       }
     },
 

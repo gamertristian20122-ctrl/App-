@@ -72,6 +72,15 @@ describe('oauth repo', () => {
     await oauth.createCode(db, { ...code, codeHash: sha('code-2'), expiresAt: new Date(now.getTime() + 60_000) })
     expect(await oauth.consumeCode(db, sha('code-2'), new Date(now.getTime() + 61_000))).toBeNull()
     expect(await oauth.consumeCode(db, sha('unknown'), now)).toBeNull()
+
+    // bound: a wrong client or challenge leaves the code unused; the right one records the family
+    await oauth.createCode(db, { ...code, codeHash: sha('code-3'), expiresAt: new Date(now.getTime() + 60_000) })
+    const familyId = '7b8d3b5e-3f4c-4a7e-9a0b-1c2d3e4f5a6b'
+    expect(await oauth.consumeCode(db, sha('code-3'), now, { clientId: 'mcp_other', codeChallenge: CHALLENGE, familyId })).toBeNull()
+    expect(await oauth.consumeCode(db, sha('code-3'), now, { clientId: client.clientId, codeChallenge: 'x'.repeat(43), familyId })).toBeNull()
+    expect((await oauth.getCode(db, sha('code-3')))?.usedAt).toBeNull()
+    const bound = await oauth.consumeCode(db, sha('code-3'), now, { clientId: client.clientId, codeChallenge: CHALLENGE, familyId })
+    expect(bound).toMatchObject({ familyId })
   })
 
   it('finds active tokens by hash and refuses revoked or expired ones', async () => {

@@ -82,7 +82,7 @@ export function ConnectView({ mcpUrl, connections, revoke, timezone }: { mcpUrl:
               {snippet}
             </pre>
             <div className="mt-2 flex items-center justify-between gap-2">
-              <CopyButton value={snippet} label="Copy JSON" />
+              <CopyButton value={snippet} label="Copy JSON" className="shrink-0 whitespace-nowrap" />
               <span className="text-xs text-neutral-500">Then sign in from Cursor Settings → MCP.</span>
             </div>
           </Card>

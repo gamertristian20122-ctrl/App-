@@ -13,6 +13,7 @@ import { reconcileBrandLimitIn, type BrandLimitChange } from './brands'
 import type { PriceKey } from './config'
 import { conflict, fromZod, requireUser, userIdOf, validation, withErrors, type Ctx } from './context'
 import { userEntitlements, type UserEntitlements } from './entitlements'
+import { requeueHeldPostsIn } from './posts'
 
 // ---------------------------------------------------------------------------------------------
 // Stripe payload shapes (only the fields we read; everything else passes through)
@@ -215,6 +216,10 @@ export function createBillingService(ctx: Ctx) {
         stripeSubscriptionId: sub.id,
       })) ?? user
     const brands = await reconcileBrandLimitIn(ctx, r, user.id, 'system')
+    // Back from a hold (trial over, canceled, unpaid): publish the posts that were held, now.
+    if (!userEntitlements(user, ctx.now()).canPublish && userEntitlements(updated, ctx.now()).canPublish) {
+      await requeueHeldPostsIn(r, user.id, ctx.now())
+    }
     await auditIn(r, user.id, {
       actor: 'system',
       action: 'billing.subscription_synced',
@@ -235,14 +240,20 @@ export function createBillingService(ctx: Ctx) {
     return { updated, brands }
   }
 
+  /**
+   * The subscription as Stripe has it now (events arrive out of order and are retried for days,
+   * so the event payload may be stale). When the fetch fails the event is NOT applied from its
+   * payload: the error makes the webhook answer non-2xx and Stripe retries. Without a fetcher
+   * (no Stripe key: local dev, tests) the payload is used.
+   */
   async function latestSubscription(id: string, fallback: unknown, options: ApplyStripeEventOptions): Promise<StripeSubscription> {
     let raw = fallback
     if (options.fetchSubscription) {
       try {
         raw = await options.fetchSubscription(id)
       } catch (error) {
-        ctx.log.warn('stripe subscription fetch failed; using the event payload', { subscriptionId: id })
-        if (fallback === undefined) throw error
+        ctx.log.warn('stripe subscription fetch failed; the event will be retried', { subscriptionId: id })
+        throw error
       }
     }
     return fromZod(StripeSubscriptionSchema, raw, 'Stripe subscription')
@@ -292,6 +303,13 @@ export function createBillingService(ctx: Ctx) {
       } else {
         invoice = fromZod(InvoiceSchema, obj, 'Invoice')
       }
+      // invoice.payment_failed: apply the subscription's current state, not "past_due" blindly (a
+      // late retry of this event must not undo a recovery that was already applied).
+      let invoiceSubscription: StripeSubscription | null = null
+      const invoiceSubscriptionId = invoice ? (invoice.subscription ?? invoice.parent?.subscription_details?.subscription ?? null) : null
+      if (invoiceSubscriptionId && options.fetchSubscription) {
+        invoiceSubscription = await latestSubscription(invoiceSubscriptionId, undefined, options)
+      }
 
       return ctx.tx(async (r): Promise<StripeEventResult> => {
         const locked = await r.stripeEvents.lockUnprocessed(event.id)
@@ -339,6 +357,21 @@ export function createBillingService(ctx: Ctx) {
         if (subscriptionId && user.stripeSubscriptionId && subscriptionId !== user.stripeSubscriptionId) {
           await r.stripeEvents.markProcessed(event.id)
           return { status: 'ignored', ...base, userId: user.id }
+        }
+        if (invoiceSubscription) {
+          const applied = await applySubscriptionIn(r, user, invoiceSubscription, false, event.id)
+          if (applied && applied.updated.subscriptionStatus !== user.subscriptionStatus) {
+            await auditIn(r, user.id, {
+              actor: 'system',
+              action: 'billing.payment_failed',
+              subjectType: 'user',
+              subjectId: user.id,
+              meta: { eventId: event.id, invoiceId: inv.id, status: applied.updated.subscriptionStatus },
+            })
+          }
+          await r.stripeEvents.markProcessed(event.id)
+          const final = applied?.updated ?? user
+          return { status: 'processed', ...base, userId: user.id, billing: summarize(final), ...(applied ? { brands: applied.brands } : {}) }
         }
         let current = user
         if (user.subscriptionStatus === 'active' || user.subscriptionStatus === 'trialing') {

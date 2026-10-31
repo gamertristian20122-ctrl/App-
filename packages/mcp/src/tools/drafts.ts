@@ -14,6 +14,9 @@ import {
   MAX_TITLE,
   PostStatusInputSchema,
   ScheduleInputSchema,
+  EMPTY_EDIT_MESSAGE,
+  TIKTOK_PRIVACY_LABELS,
+  TIKTOK_PRIVACY_LEVELS,
   VariantInputSchema,
   createScheduleInputSchema,
   lineSchema,
@@ -85,7 +88,7 @@ export const createDraft: ToolDef = {
   description:
     'Saves a post as a draft for one brand, with one variant per platform (text, optional title, media ids, platform options). ' +
     'Text is checked against each platform\'s limits (X counts links as 23 and emoji as 2; X posts may not contain links). ' +
-    'Nothing is published: next call approve_draft so the user can review and approve it. Load the write_post prompt first to write in the brand\'s voice.',
+    'Nothing is published: next call approve_draft so the user can review and approve it. Read the brand\'s writing brief first (list_accounts with the brandId: voice profile and platform rules) and write in that voice.',
   input: DraftInputSchema,
   describe: {
     brandId: 'The brand id (from list_accounts).',
@@ -309,8 +312,9 @@ const EditSchema = z
     platform: PlatformSchema,
     text: textSchema(MAX_POST_TEXT).optional(),
     title: lineSchema(0, MAX_TITLE).optional(),
+    privacyLevel: z.enum(TIKTOK_PRIVACY_LEVELS).optional(),
   })
-  .refine((v) => v.text !== undefined || v.title !== undefined, 'Change the text or the title.')
+  .refine((v) => v.text !== undefined || v.title !== undefined || v.privacyLevel !== undefined, EMPTY_EDIT_MESSAGE)
 
 export const approvalDecide: ToolDef = {
   name: 'approval_decide',
@@ -334,7 +338,7 @@ export const approvalEditVariant: ToolDef = {
   name: 'approval_edit_variant',
   title: 'Edit a draft in the approval card',
   description:
-    'Used by the approval card when the user edits the text or title of one platform before approving. Requires the card\'s one-time token. Not for the assistant.',
+    'Used by the approval card when the user edits the text or title of one platform, or chooses who can see a TikTok post, before approving. Requires the card\'s one-time token. Not for the assistant.',
   input: EditSchema,
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   meta: { ...APP_ONLY_META },
@@ -343,8 +347,12 @@ export const approvalEditVariant: ToolDef = {
     const preview = await ctx.services.drafts.preview(ctx.userId, draft.draft.id)
     const platform = String(args.platform) as Platform
     const webUrl = webApprovalUrl(ctx, draft.draft.id)
+    const what =
+      args.text === undefined && args.title === undefined && typeof args.privacyLevel === 'string'
+        ? `chose who can see the ${PLATFORM_LABELS[platform] ?? platform} post (${TIKTOK_PRIVACY_LABELS[args.privacyLevel as keyof typeof TIKTOK_PRIVACY_LABELS] ?? args.privacyLevel}) in`
+        : `edited the ${PLATFORM_LABELS[platform] ?? platform} text of`
     return ok(
-      `The user edited the ${PLATFORM_LABELS[platform] ?? platform} text of draft ${draft.draft.id} (now revision ${draft.draft.revision}). It still needs their approval.`,
+      `The user ${what} draft ${draft.draft.id} (now revision ${draft.draft.revision}). It still needs their approval.`,
       { draftId: draft.draft.id, platform, revision: draft.draft.revision, ready: draft.ready, preview: modelPreview(preview) },
       cardMeta(preview, nonce, webUrl),
     )

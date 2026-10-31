@@ -5,6 +5,7 @@
 
 import { PLATFORM_RULES, type TextUnit } from '@app/core/platforms'
 import { PLATFORM_LABELS } from '@app/core/types'
+import { TIKTOK_PRIVACY_LABELS, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
 import type { PostRow } from '@app/db'
 import { PreviewCard } from '@/components/platform/preview-card'
 import { PlatformBadge } from '@/components/platform/platform-badge'
@@ -83,6 +84,38 @@ function EditVariantForm({ item, platform, actions }: { item: ApprovalItem; plat
 }
 
 type PreviewVariantLike = ApprovalItem['preview']['variants'][number]
+
+/** TikTok requires the person to choose who can see each post (no default), here or in the card. */
+function TikTokPrivacyForm({ item, platform, actions }: { item: ApprovalItem; platform: PreviewVariantLike; actions: ApprovalActions }) {
+  if (platform.platform !== 'tiktok') return null
+  const draftId = item.preview.draft.id
+  const current = typeof platform.options.privacyLevel === 'string' ? platform.options.privacyLevel : ''
+  const fieldId = `privacy-${draftId}`
+  return (
+    <ActionForm action={actions.edit} className="flex flex-wrap items-end gap-2" inline aria-label="TikTok privacy">
+      <Hidden draftId={draftId} nonce={item.nonce} />
+      <input type="hidden" name="platform" value="tiktok" />
+      <div className="min-w-48 flex-1">
+        <label htmlFor={fieldId} className="block text-xs font-medium text-neutral-700 dark:text-neutral-300">
+          Who can see this TikTok post
+        </label>
+        <select id={fieldId} name="privacyLevel" required defaultValue={current} className={cx(input, 'mt-1')}>
+          <option value="" disabled>
+            Choose…
+          </option>
+          {TIKTOK_PRIVACY_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {TIKTOK_PRIVACY_LABELS[level]}
+            </option>
+          ))}
+        </select>
+      </div>
+      <SubmitButton variant="secondary" pendingLabel="Saving…">
+        Save
+      </SubmitButton>
+    </ActionForm>
+  )
+}
 
 function PostsList({ posts, timezone, actions }: { posts: PostRow[]; timezone: string; actions: ApprovalActions }) {
   const visible = posts.filter((p) => p.status !== 'canceled')
@@ -165,8 +198,13 @@ export function DraftCard({ item, actions, now }: { item: ApprovalItem; actions:
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         {preview.variants.map((v) => (
-          <PreviewCard key={v.platform} variant={v}>
-            {item.nonce && (draft.status === 'draft' || draft.status === 'approved') ? <EditVariantForm item={item} platform={v} actions={actions} /> : null}
+          <PreviewCard key={v.platform} variant={v} privacyPicker={Boolean(item.nonce) && (draft.status === 'draft' || draft.status === 'approved')}>
+            {item.nonce && (draft.status === 'draft' || draft.status === 'approved') ? (
+              <>
+                <TikTokPrivacyForm item={item} platform={v} actions={actions} />
+                <EditVariantForm item={item} platform={v} actions={actions} />
+              </>
+            ) : null}
           </PreviewCard>
         ))}
       </div>

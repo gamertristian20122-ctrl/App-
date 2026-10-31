@@ -63,9 +63,15 @@ export function zonedLocalToUtc(local: string, tz: string): Date | null {
   const check = new Date(guess)
   if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null
   const zone = safeTimeZone(tz)
-  const first = guess - timeZoneOffsetMs(new Date(guess), zone)
-  const second = guess - timeZoneOffsetMs(new Date(first), zone)
-  return new Date(second)
+  const offsetA = timeZoneOffsetMs(new Date(guess), zone)
+  const first = guess - offsetA
+  const offsetB = timeZoneOffsetMs(new Date(first), zone)
+  const second = guess - offsetB
+  const p = zonedParts(new Date(second), zone)
+  if (p.year === y && p.month === mo && p.day === d && p.hour === h && p.minute === mi && p.second === s) return new Date(second)
+  // A spring-forward gap: the wall time does not exist. Use the offset from before the change
+  // (the smaller one), which lands the same distance after the gap (02:30 → 03:30), never before.
+  return new Date(guess - Math.min(offsetA, offsetB))
 }
 
 /** The value for <input type="datetime-local"> showing `date` in `tz`. */

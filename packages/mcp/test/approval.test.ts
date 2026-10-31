@@ -172,7 +172,7 @@ describe('approval_edit_variant', () => {
     const first = cardMeta(await c.call('approve_draft', { draftId }))
 
     expectToolError(await c.call('approval_edit_variant', { draftId, platform: 'x', text: 'New' }), 'validation', /nonce/)
-    expectToolError(await c.call('approval_edit_variant', { draftId, nonce: first.nonce, platform: 'x' }), 'validation', /text or the title/)
+    expectToolError(await c.call('approval_edit_variant', { draftId, nonce: first.nonce, platform: 'x' }), 'validation', /Change the text, the title or who can see/)
     expectToolError(
       await c.call('approval_edit_variant', { draftId, nonce: first.nonce, platform: 'x', text: 'y'.repeat(290) }),
       'validation',

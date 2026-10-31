@@ -113,6 +113,45 @@ describe('billing.applyStripeEvent', () => {
     expect(await h.s.users.getEntitlements(user.id)).toMatchObject({ canPublish: true, canProcessMedia: false })
   })
 
+  it('a late invoice.payment_failed retry does not undo a recovery (review): it applies the subscription as Stripe has it now', async () => {
+    const user = await createTestUser(h.db, { plan: 'plus', stripeCustomerId: 'cus_late' })
+    await h.r.users.updateBilling(user.id, { stripeSubscriptionId: 'sub_late' })
+    let status = 'active' // the card was fixed and the invoice paid before Stripe retried this event
+    const fetchSubscription = async (id: string) => subscription({ id, customer: 'cus_late', plan: 'plus', status })
+    const failed = event('invoice.payment_failed', { id: 'in_late', customer: 'cus_late', parent: { subscription_details: { subscription: 'sub_late' } } })
+    const res = await h.s.billing.applyStripeEvent(failed, { fetchSubscription })
+    expect(res).toMatchObject({ status: 'processed', billing: { status: 'active' } })
+    expect(await h.s.users.getEntitlements(user.id)).toMatchObject({ canProcessMedia: true })
+
+    // while the subscription really is past_due, the event puts the user on past_due
+    status = 'past_due'
+    const again = await h.s.billing.applyStripeEvent(
+      event('invoice.payment_failed', { id: 'in_late2', customer: 'cus_late', subscription: 'sub_late' }),
+      { fetchSubscription },
+    )
+    expect(again.billing?.status).toBe('past_due')
+    expect(await h.s.audit.list(user.id, { action: 'billing.payment_failed' })).toHaveLength(1)
+  })
+
+  it('a failed subscription fetch is retried by Stripe, never applied from the stale payload (review)', async () => {
+    const user = await createTestUser(h.db, { plan: 'plus', stripeCustomerId: 'cus_f' })
+    await h.r.users.updateBilling(user.id, { stripeSubscriptionId: 'sub_f' })
+    const down = async () => {
+      throw new Error('stripe unavailable')
+    }
+    const stale = event('customer.subscription.updated', subscription({ id: 'sub_f', customer: 'cus_f', status: 'past_due', plan: 'plus' }))
+    await expect(h.s.billing.applyStripeEvent(stale, { fetchSubscription: down })).rejects.toThrow()
+    expect((await h.s.users.get(user.id)).subscriptionStatus).toBe('active')
+    const inv = event('invoice.payment_failed', { id: 'in_f', customer: 'cus_f', subscription: 'sub_f' })
+    await expect(h.s.billing.applyStripeEvent(inv, { fetchSubscription: down })).rejects.toThrow()
+    expect((await h.s.users.get(user.id)).subscriptionStatus).toBe('active')
+    // Stripe's retry with Stripe reachable again
+    const up = async (id: string) => subscription({ id, customer: 'cus_f', plan: 'plus', status: 'active' })
+    expect((await h.s.billing.applyStripeEvent(stale, { fetchSubscription: up })).status).toBe('processed')
+    expect((await h.s.billing.applyStripeEvent(inv, { fetchSubscription: up })).status).toBe('processed')
+    expect((await h.s.users.get(user.id)).subscriptionStatus).toBe('active')
+  })
+
   it('invoice.payment_failed of an older subscription does not hold the current one', async () => {
     // regression: the user was matched through the customer id and put on past_due
     const user = await createTestUser(h.db, { plan: 'plus', stripeCustomerId: 'cus_10' })

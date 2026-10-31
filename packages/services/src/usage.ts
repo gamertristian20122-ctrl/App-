@@ -81,7 +81,7 @@ function describe(meter: UsageMeter, amount: number): string {
   return `${amount} post${amount === 1 ? '' : 's'}`
 }
 
-async function balanceIn(r: BoundRepos, userId: string, ent: UserEntitlements, meter: UsageMeter): Promise<UsageBalance> {
+export async function balanceIn(r: BoundRepos, userId: string, ent: UserEntitlements, meter: UsageMeter): Promise<UsageBalance> {
   const totals = await r.usage.totals(userId, meter, ent.period.start)
   const limit = limitFor(ent, meter)
   return {

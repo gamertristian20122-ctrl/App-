@@ -18,12 +18,14 @@ import {
 import { PLATFORM_LABELS, PlatformSchema, type Actor, type Platform } from '@app/core/types'
 import {
   DraftInputSchema,
+  describeOptions,
   EditVariantInputSchema,
   IdSchema,
   ListDraftsInputSchema,
   RejectDraftInputSchema,
   UpsertVariantInputSchema,
   textSchema,
+  type OptionLine,
   type VariantInput,
 } from '@app/core/validation'
 import type { AccountRow, BoundRepos, BrandRow, DraftRow, MediaRow, VariantInput as DbVariantInput, VariantRow } from '@app/db'
@@ -96,6 +98,11 @@ export interface PreviewVariant {
   text: string
   title: string | null
   options: Record<string, unknown>
+  /**
+   * Every option the variant publishes with (first comment, collaborators, visibility, ids...),
+   * labelled for people. Every approval surface shows these, so nothing is published unseen.
+   */
+  optionLines: OptionLine[]
   media: PreviewMedia[]
   account: VariantAccount | null
   issues: ValidationIssue[]
@@ -376,6 +383,7 @@ export function createDraftsService(ctx: Ctx) {
           text: variant.text,
           title: variant.title,
           options: variant.options,
+          optionLines: describeOptions(variant.platform, variant.options),
           media: variant.mediaIds.flatMap((mid) => {
             const m = byId.get(mid)
             if (!m) return []
@@ -438,16 +446,17 @@ export function createDraftsService(ctx: Ctx) {
         if (!variant) throw notFound(`The ${PLATFORM_LABELS[data.platform]} variant`)
         const text = data.text ?? variant.text
         const title = data.title !== undefined ? data.title || null : variant.title
+        // TikTok: the person chooses who can see the post (no default; see EditVariantInputSchema)
+        const options = data.privacyLevel !== undefined ? { ...variant.options, privacyLevel: data.privacyLevel } : variant.options
         const media = await r.media.getMany(uid, variant.mediaIds)
-        assertNoErrors(
-          validateVariant(variant.platform, { text, title, mediaIds: variant.mediaIds, options: variant.options }, { media: media.map(mediaFacts) }),
-        )
+        assertNoErrors(validateVariant(variant.platform, { text, title, mediaIds: variant.mediaIds, options }, { media: media.map(mediaFacts) }))
         await r.drafts.updateVariant(uid, variant.id, {
           text,
           title,
-          hasLink: variantLink(text, variant.options),
+          ...(data.privacyLevel !== undefined ? { options } : {}),
+          hasLink: variantLink(text, options),
         })
-        await afterEdit(r, uid, draft, via, { platform: data.platform })
+        await afterEdit(r, uid, draft, via, { platform: data.platform, ...(data.privacyLevel !== undefined ? { privacyLevel: data.privacyLevel } : {}) })
       })
       return view(uid, data.draftId)
     },

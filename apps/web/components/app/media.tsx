@@ -64,6 +64,9 @@ export function MediaList({ items, actions, nextCursor }: { items: MediaItem[]; 
                 {media.bytes ? ` · ${formatBytes(media.bytes)}` : ''}
                 {media.width && media.height ? ` · ${media.width}×${media.height}` : ''}
               </p>
+              <p className="text-xs text-neutral-500">
+                Media id (for your AI assistant): <code className="select-all break-all font-mono">{media.id}</code>
+              </p>
             </div>
             <div className="flex items-center gap-2">
               {clipSource && media.status !== 'failed' ? (

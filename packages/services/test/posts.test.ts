@@ -130,6 +130,48 @@ describe('posts: reschedule, cancel, status, calendar', () => {
     await expectAppError(h.s.posts.get(other.userId, post.id), 'not_found')
   })
 
+  it('a cancel by the person withdraws the approval: the AI cannot schedule it again (review)', async () => {
+    const t = await xTenant()
+    await connect(h, t.userId, t.brandId, 'linkedin')
+    const d = await approvedDraft(h, t.userId, t.brandId, [
+      { platform: 'x', text: 'cancel me' },
+      { platform: 'linkedin', text: 'keep me' },
+    ])
+    const posts = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) }, { via: 'mcp' })
+    const x = posts.find((p) => p.platform === 'x')
+    const canceled = await h.s.posts.cancel(t.userId, x?.id ?? '', { via: 'web' })
+    expect(canceled).toMatchObject({ status: 'canceled', canceledBy: 'web' })
+
+    const err = await expectAppError(h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: 'now' }, { via: 'mcp' }), 'conflict', /user canceled the X post/)
+    expect(err.details).toMatchObject({ reason: 'canceled_by_user', platform: 'x' })
+    expect(await h.s.jobs.listForUser(t.userId, { type: 'publish_post' })).toHaveLength(2) // nothing new queued
+    // the other variant is untouched and can still be moved by the AI
+    expect(await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(2 * HOUR), platforms: ['linkedin'] }, { via: 'mcp' })).toHaveLength(1)
+    // the person can schedule it again from the web app
+    const again = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(3 * HOUR), platforms: ['x'] }, { via: 'web' })
+    expect(again[0]?.status).toBe('scheduled')
+  })
+
+  it('after a person cancel, a new approval (reject + approve, or edit + approve) lets the AI schedule again', async () => {
+    const t = await xTenant()
+    const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'second thoughts' }])
+    const [post] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) })
+    await h.s.posts.cancel(t.userId, post?.id ?? '', { via: 'web' })
+    await expectAppError(h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) }), 'conflict', /canceled/)
+    h.clock.advance(60_000)
+    const n1 = await h.s.approvals.issueNonce(t.userId, d.draft.id)
+    await h.s.approvals.reject(t.userId, { draftId: d.draft.id, nonce: n1.nonce, reason: 'not today' })
+    const n2 = await h.s.approvals.issueNonce(t.userId, d.draft.id)
+    await h.s.approvals.approve(t.userId, { draftId: d.draft.id, nonce: n2.nonce })
+    expect(await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(2 * HOUR) })).toHaveLength(1)
+
+    // a system cancel (account disconnected) is not a withdrawal
+    const d2 = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'system cancel' }])
+    const [p2] = await h.s.posts.schedule(t.userId, { draftId: d2.draft.id, at: iso(3 * HOUR) })
+    await h.r.posts.cancel(t.userId, p2?.id ?? '', 'The account was disconnected.')
+    expect(await h.s.posts.schedule(t.userId, { draftId: d2.draft.id, at: iso(4 * HOUR) })).toHaveLength(1)
+  })
+
   it('a publishing post cannot be canceled', async () => {
     const t = await xTenant()
     const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'hi' }])
@@ -233,12 +275,75 @@ describe('posts: the publish cycle (worker)', () => {
     expect(failed.post.status).toBe('failed')
   })
 
-  it('enqueueDue re-queues lost publish jobs', async () => {
+  it('enqueueDue re-queues lost publish jobs once; a post whose sweep job died too is failed', async () => {
     const t = await xTenant()
     const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'lost' }])
-    await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) })
-    expect(await h.s.posts.enqueueDue(new Date(START.getTime() + 2 * HOUR))).toBe(1)
-    expect(await h.s.posts.enqueueDue(new Date(START.getTime() + 2 * HOUR))).toBe(0)
+    const [post] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) })
+    const later = new Date(START.getTime() + 2 * HOUR)
+    // its queued job is still live: nothing to do
+    expect(await h.s.posts.enqueueDue(later)).toBe(0)
+    // the job was lost
+    await h.db.query(`delete from public.jobs where payload->>'postId' = $1`, [post?.id])
+    expect(await h.s.posts.enqueueDue(later)).toBe(1)
+    expect(await h.s.posts.enqueueDue(later)).toBe(0)
+    // the sweep job died as well: the post fails instead of being swept forever
+    await h.db.query(`update public.jobs set status = 'dead', finished_at = now() where payload->>'postId' = $1`, [post?.id])
+    expect(await h.s.posts.enqueueDue(later)).toBe(0)
+    expect(await h.s.posts.get(t.userId, post?.id ?? '')).toMatchObject({ status: 'failed', error: expect.stringMatching(/could not start/) })
+  })
+
+  it('held posts (with their next check queued) never fill the sweep batch (review: starvation)', async () => {
+    const held = await xTenant()
+    for (let i = 0; i < 3; i++) {
+      const d = await approvedDraft(h, held.userId, held.brandId, [{ platform: 'x', text: `held ${i}` }])
+      const [p] = await h.s.posts.schedule(held.userId, { draftId: d.draft.id, at: 'now' })
+      await h.r.users.updateBilling(held.userId, { subscriptionStatus: 'canceled' })
+      expect((await h.s.posts.preparePublish(held.userId, p?.id ?? '')).action).toBe('deferred')
+      await h.r.users.updateBilling(held.userId, { subscriptionStatus: 'active' })
+    }
+    await h.r.users.updateBilling(held.userId, { subscriptionStatus: 'canceled' })
+    const t = await xTenant()
+    const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'paying customer' }])
+    const [lost] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: iso(HOUR) })
+    await h.db.query(`delete from public.jobs where payload->>'postId' = $1`, [lost?.id])
+    expect(await h.s.posts.enqueueDue(new Date(START.getTime() + 2 * HOUR), 2)).toBe(1)
+    const jobs = await h.s.jobs.listForUser(t.userId, { type: 'publish_post' })
+    expect(jobs).toHaveLength(1)
+  })
+
+  it('held posts are checked less often the longer they are held, and re-queued at once when billing is back', async () => {
+    const t = await xTenant()
+    const d = await approvedDraft(h, t.userId, t.brandId, [{ platform: 'x', text: 'held long' }])
+    const [post] = await h.s.posts.schedule(t.userId, { draftId: d.draft.id, at: 'now' })
+    await h.r.users.updateBilling(t.userId, { subscriptionStatus: 'canceled' })
+    const first = await h.s.posts.preparePublish(t.userId, post?.id ?? '')
+    expect(first).toMatchObject({ action: 'deferred', reason: 'held', until: new Date(START.getTime() + 6 * HOUR) })
+    h.clock.advance(10 * DAY)
+    expect(await h.s.posts.preparePublish(t.userId, post?.id ?? '')).toMatchObject({ until: new Date(START.getTime() + 15 * DAY) })
+    h.clock.advance(30 * DAY)
+    expect(await h.s.posts.preparePublish(t.userId, post?.id ?? '')).toMatchObject({ until: new Date(START.getTime() + 47 * DAY) })
+
+    // the user subscribes again: the held post is queued to publish now, not in a week
+    await h.r.users.updateBilling(t.userId, { stripeCustomerId: 'cus_back', stripeSubscriptionId: 'sub_back' })
+    const now = h.clock.now()
+    await h.s.billing.applyStripeEvent({
+      id: 'evt_back',
+      object: 'event',
+      type: 'customer.subscription.updated',
+      created: 1,
+      data: {
+        object: {
+          id: 'sub_back',
+          customer: 'cus_back',
+          status: 'active',
+          items: { data: [{ price: { id: 'price_starter', lookup_key: 'starter' }, quantity: 1 }] },
+          metadata: {},
+        },
+      },
+    })
+    const jobs = await h.s.jobs.listForUser(t.userId, { type: 'publish_post' })
+    expect(jobs.some((j) => j.runAt.getTime() === now.getTime())).toBe(true)
+    expect((await h.s.posts.preparePublish(t.userId, post?.id ?? '')).action).toBe('publish')
   })
 })
 
@@ -290,6 +395,21 @@ describe('posts: interrupted publishes and late confirmations (integration)', ()
     const failed = await h.s.posts.get(t.userId, post.id)
     expect(failed.status).toBe('failed')
     expect(failed.error).toMatch(/interrupted/)
+  })
+
+  it('two overlapping cleanups: the second leaves a post alone while the first one\'s resume job is live (review)', async () => {
+    const { t, post } = await stuckPost()
+    // cleanup A listed the post and queued its resume job before cleanup B looked it up (the
+    // job's payload points elsewhere so B's listing still returns the post)
+    await h.r.jobs.enqueue({
+      type: 'publish_post',
+      payload: { userId: t.userId, postId: '00000000-0000-4000-8000-000000000001' },
+      userId: t.userId,
+      idempotencyKey: `publish_post:${post.id}:resume:${post.attempts}`,
+    })
+    const res = await h.s.posts.recoverStuckPublishing(h.clock.now())
+    expect(res).toEqual({ resumed: 0, rechecked: 0, failed: 0 })
+    expect((await h.s.posts.get(t.userId, post.id)).status).toBe('publishing')
   })
 
   it('cleanup re-checks a stuck post that has a request id (final poll), then fails it', async () => {
