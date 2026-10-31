@@ -29,6 +29,10 @@ export interface ServicesConfig {
   maxActiveClipsPerSource: number
   /** Drive links per user still waiting to be downloaded (each ties up the media worker). */
   maxPendingDriveLinks: number
+  /** URL imports (upload_media sourceUrl) per user still waiting to be fetched. */
+  maxPendingUrlImports: number
+  /** render_code_video jobs per user queued or running at once (each holds a browser for minutes). */
+  maxActiveCodeRenders: number
   /** How early a publish job may run before scheduled_for (clock skew between hosts). */
   publishEarlyToleranceMs: number
   /** Cap full at dispatch: move the post this far (ARCHITECTURE: +1 h). */
@@ -63,6 +67,8 @@ export const DEFAULT_SERVICES_CONFIG: Readonly<ServicesConfig> = Object.freeze({
   maxClipsPerRequest: 20,
   maxActiveClipsPerSource: 60,
   maxPendingDriveLinks: 3,
+  maxPendingUrlImports: 5,
+  maxActiveCodeRenders: 3,
   publishEarlyToleranceMs: 30 * SECOND_MS,
   capRetryDelayMs: HOUR_MS,
   heldRetryDelayMs: 6 * HOUR_MS,
@@ -84,6 +90,8 @@ export function resolveServicesConfig(partial: Partial<ServicesConfig> = {}): Se
   merged.maxClipsPerRequest = clamp(merged.maxClipsPerRequest, 1, 30)
   merged.maxActiveClipsPerSource = clamp(merged.maxActiveClipsPerSource, 1, 1_000)
   merged.maxPendingDriveLinks = clamp(merged.maxPendingDriveLinks, 1, 100)
+  merged.maxPendingUrlImports = clamp(merged.maxPendingUrlImports, 1, 100)
+  merged.maxActiveCodeRenders = clamp(merged.maxActiveCodeRenders, 1, 50)
   merged.importDedupeWindowMs = clamp(merged.importDedupeWindowMs, MINUTE_MS, DAY_MS)
   merged.mcpResourceUrl = (merged.mcpResourceUrl || `${merged.appUrl}/api/mcp`).replace(/\/+$/, '')
   merged.oauthAccessTokenTtlSec = clamp(merged.oauthAccessTokenTtlSec, 60, 86_400)

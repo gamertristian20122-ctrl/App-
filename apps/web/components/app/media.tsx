@@ -17,7 +17,7 @@ export interface MediaActions {
 }
 
 const KIND_LABEL: Record<string, string> = { video: 'Video', image: 'Image', audio: 'Audio', captions: 'Captions' }
-const ORIGIN_LABEL: Record<string, string> = { upload: 'Uploaded', drive_link: 'Cloud drive', clip: 'Clip', render: 'Rendered' }
+const ORIGIN_LABEL: Record<string, string> = { upload: 'Uploaded', drive_link: 'Cloud drive', clip: 'Clip', render: 'Rendered', url_import: 'From a link' }
 const PROVIDER_LABEL: Record<string, string> = { google_drive: 'Google Drive', dropbox: 'Dropbox', onedrive: 'OneDrive' }
 
 function KindIcon({ kind }: { kind: string }) {

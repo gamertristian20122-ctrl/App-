@@ -2,8 +2,10 @@
 // crop for landscape, blurred fill for portrait/square/narrow, burned-in ASS captions from the
 // transcript words, H.264 + AAC, faststart) → output checked with ffprobe → storage (clip key) →
 // services.clips.completeRender, which records the output media and creates a DRAFT with a variant
-// per connected video platform of the brand (text = the clip's hook/title). Nothing is posted: a
-// human approves the draft. A failure for good marks the clip failed.
+// per connected video platform of the brand (text = the clip's hook/title). Nothing is posted
+// unless the job carries autoPublish (make_clips) and the brand's Auto-post rule approves the draft
+// (services.autoPost: only when the user turned Auto-post on); otherwise a human approves it.
+// A failure for good marks the clip failed.
 
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -19,6 +21,7 @@ import { hashFile, withTempDir } from './files'
 import { isFinalAttempt, isRetryableMediaError, resolveMediaOptions, type MediaHandlerOptions } from './options'
 import { MediaToolError, runTool } from './process'
 import { probe } from './probe'
+import { applyAutoPublish, type AutoPostOutcome } from './renders'
 import { withStoredSource } from './source'
 
 export const CLIP_MESSAGES = {
@@ -37,6 +40,7 @@ export interface ClipOutcome {
   durationMs?: number
   framing?: 'crop' | 'blur'
   captions?: boolean
+  autoPost?: AutoPostOutcome
 }
 
 function captionStyleOf(value: unknown): CaptionStyle {
@@ -46,7 +50,7 @@ function captionStyleOf(value: unknown): CaptionStyle {
 export function createClipRender(options: MediaHandlerOptions = {}): Handler {
   const o = resolveMediaOptions(options)
   return async (job, ctx): Promise<ClipOutcome> => {
-    const { userId, clipId } = payloadOf('clip_render', job)
+    const { userId, clipId, autoPublish } = payloadOf('clip_render', job)
     const { services } = ctx
 
     let plan: RenderJobInput
@@ -55,7 +59,11 @@ export function createClipRender(options: MediaHandlerOptions = {}): Handler {
     } catch (error) {
       if (isAppError(error) && error.code === 'conflict') {
         const clip = await services.clips.get(userId, clipId)
-        if (clip.status === 'ready') return { clipId, status: 'ready', skipped: true, outputMediaId: clip.outputMediaId, draftId: clip.draftId }
+        if (clip.status === 'ready') {
+          // a retry after the render finished: the Auto-post decision is idempotent
+          const autoPost = await applyAutoPublish(ctx, userId, clip.draftId, autoPublish)
+          return { clipId, status: 'ready', skipped: true, outputMediaId: clip.outputMediaId, draftId: clip.draftId, ...(autoPost ? { autoPost } : {}) }
+        }
         await services.clips.failRender(userId, clipId, error)
         throw new PermanentJobError(safeErrorMessage(error, CLIP_MESSAGES.failed))
       }
@@ -100,15 +108,21 @@ export function createClipRender(options: MediaHandlerOptions = {}): Handler {
         const { sha256, bytes } = await hashFile(output, ctx.signal)
         await ctx.storage.putFile(outputKey, output, 'video/mp4')
         throwIfAborted(ctx.signal)
-        const done = await services.clips.completeRender(userId, clipId, {
-          bytes,
-          durationMs: Math.min(outDuration, 200_000),
-          width: CLIP_WIDTH,
-          height: CLIP_HEIGHT,
-          mimeType: 'video/mp4',
-          sha256,
-        })
-        ctx.logger.info('clip rendered', { clipId, durationMs: outDuration, framing, captions, draftId: done.draft?.id ?? null })
+        const done = await services.clips.completeRender(
+          userId,
+          clipId,
+          {
+            bytes,
+            durationMs: Math.min(outDuration, 200_000),
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+            mimeType: 'video/mp4',
+            sha256,
+          },
+          autoPublish?.platforms ? { platforms: autoPublish.platforms } : {},
+        )
+        const autoPost = await applyAutoPublish(ctx, userId, done.draft?.id ?? null, autoPublish)
+        ctx.logger.info('clip rendered', { clipId, durationMs: outDuration, framing, captions, draftId: done.draft?.id ?? null, autoPost: autoPost?.outcome })
         return {
           clipId,
           status: 'ready',
@@ -117,6 +131,7 @@ export function createClipRender(options: MediaHandlerOptions = {}): Handler {
           durationMs: outDuration,
           framing,
           captions,
+          ...(autoPost ? { autoPost } : {}),
         }
       })
     } catch (error) {

@@ -164,7 +164,8 @@ and `packages/services/src/config.ts`. A change marked "migration" also needs a 
 | Pending drive links | at most 3 per user waiting to download | `maxPendingDriveLinks` in `packages/services/src/config.ts` |
 | Allowed cloud drives | Google Drive, Dropbox, OneDrive (https only); YouTube and every other video site refused | `DRIVE_HOSTS` in `packages/core/src/links.ts` (+ migration: a database check mirrors it) |
 | Rights | a "I own this content" checkbox per clip-source video, in the web app only | `apps/web/components/app/media-uploader.tsx`, `packages/services/src/media.ts` |
-| Getting media from an AI chat | not possible: the AI can't upload; users upload on `/app/media` (plan suggested a short-lived upload link) | would be a new MCP tool (needs plan approval) |
+| Getting media from an AI | `upload_media`: a one-hour presigned PUT (and a ready `curl` command) for coding assistants, at most 5 GB; or an https link we download (public hosts only; YouTube, TikTok, Instagram, X, Facebook, Vimeo, Twitch and other video sites refused); at most 5 links waiting per user. Post media only, never clip sources | `AiUploadInputSchema`, `checkImportUrl` in `packages/core`; `maxPendingUrlImports` in `packages/services/src/config.ts` |
+| Code videos (`render_code_video`) | HTML ≤ 300 KB, 1–60 s, 24 or 30 fps, every network request blocked; not metered (there is no render-seconds meter: gated like template renders, blocked when billing is on hold), at most 3 queued or rendering per user | `CODE_VIDEO_LIMITS` in `packages/core/src/validation.ts`; `maxActiveCodeRenders` in `packages/services/src/config.ts`; timeouts in `apps/worker/src/media/code-video.ts` |
 | Videos without sound | can't be clipped (transcription fails and is refunded) | `apps/worker/src/media/transcribe.ts` |
 | Renders (carousels, template videos) | not metered and no limit on how many run at once (plan suggested 3× clipping time, 3 at once); blocked only when billing is on hold | `packages/services/src/renders.ts` |
 | Unfinished clip charges | released automatically after 48 h without a transcript | `ORPHAN_RESERVATION_AFTER_MS` in `packages/services/src/maintenance.ts` |
@@ -183,7 +184,11 @@ and `packages/services/src/config.ts`. A change marked "migration" also needs a 
 | Rescheduling an approved post | allowed without re-approval (logged) | `reschedule` in `packages/services/src/posts.ts` |
 | Canceling a post | if the person cancels, the AI can't schedule that variant again until it is re-approved | `cancel` / `schedule` in `packages/services/src/posts.ts` |
 | One approval, one publication | each approved platform version publishes once | database index (migration) |
-| TikTok "who can see this" | no default: the person must choose before approving | `validateVariant` in `packages/core/src/platforms.ts` |
+| TikTok "who can see this" | no default: the person must choose before approving (for Auto-post, once in the brand's Auto-post settings) | `validateVariant` in `packages/core/src/platforms.ts` |
+| Auto-post switch | **off** for every brand; only the person turns it on, on the Brands page (MCP clients and workers are refused) | `brands.setAutoPost` in `packages/services/src/brands.ts`; migration 0004 |
+| Auto-post daily maximum | **3** drafts per brand in any 24 hours (the person can pick 1–25); above it, drafts wait for approval | `AUTO_POST_DAILY_MAX` in `packages/core/src/autopost.ts`; migration 0004 default |
+| Auto-post platforms | all connected platforms unless the person ticks some | Brands page |
+| Auto-post times | "now" = the next minute; an ISO time as asked; "best" = TikTok 12:00/19:00, YouTube 15:00, Instagram 11:00/19:00, Facebook 13:00, Threads 12:00, X 09:00/17:00, LinkedIn 08:00/12:00, Pinterest 20:00, Bluesky 10:00/18:00 in the brand's time zone (first free slot at least 5 minutes ahead, within 7 days) | `BEST_TIME_SLOTS` in `packages/core/src/autopost.ts` |
 | Publish retries | up to 5 attempts on temporary provider errors, then failed with the provider's message | `recordPublishError` in `packages/services/src/posts.ts` |
 | Waiting for a post to go live | status checked for about 24 h, then failed | `STATUS_POLL_BUDGET` in `apps/worker/src/context.ts` |
 | One account per platform per brand | yes (Upload-Post allows one per profile) | migration + Upload-Post limit |
@@ -209,4 +214,4 @@ and `packages/services/src/config.ts`. A change marked "migration" also needs a 
 | Unused AI app registrations | deleted after 7 days | `packages/services/src/maintenance.ts` |
 | Rate limits | per server instance: 240 MCP calls/min per user, 30 registrations and 300 token calls/min per IP, 5 sign-in emails/min per IP | `apps/web/lib/server/rate-limit.ts` |
 | Background schedule | worker: clean-up hourly, account analytics daily, lost-post sweep every few minutes; Vercel crons daily as a backup (04:23 and 05:41 UTC) | `apps/worker/src/scheduler.ts`, `apps/web/vercel.json` |
-| MCP tools | the 14 v1 tools; `get_writing_brief`, `list_media` and a merge mode for `save_voice_profile` were proposed in `docs/REVIEW.md` and wait for your approval (their content is reachable through existing tools today) | `packages/mcp` after a plan |
+| MCP tools | the 14 v1 tools plus `upload_media`, `render_code_video` and `publish_video` (docs/plans/02-auto-post.md); `get_writing_brief`, `list_media` and a merge mode for `save_voice_profile` were proposed in `docs/REVIEW.md` and wait for your approval (their content is reachable through existing tools today) | `packages/mcp` after a plan |

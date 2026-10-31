@@ -15,7 +15,14 @@ export type DraftRow = DraftView['draft']
 export type VariantRow = DraftSummary['variants'][number]
 
 export function brandView(b: BrandRow) {
-  return { id: b.id, name: b.name, timezone: b.timezone, status: b.status }
+  return {
+    id: b.id,
+    name: b.name,
+    timezone: b.timezone,
+    status: b.status,
+    /** Read-only for the AI: only the user changes it, in the web app. */
+    autoPost: { enabled: b.autoPostEnabled, platforms: b.autoPostPlatforms, dailyMax: b.autoPostDailyMax },
+  }
 }
 
 export function accountView(a: AccountRow) {
@@ -48,6 +55,9 @@ function draftRowView(d: DraftRow) {
     revision: d.revision,
     approvedRevision: d.approvedRevision,
     approvedAt: d.approvedAt,
+    /** 'auto_post' = approved by the brand's Auto-post rule (the user turned it on); 'web' / 'mcp' = the user. */
+    approvedVia: d.approvedVia,
+    autoPost: d.autoPostRequestedAt ? { when: d.autoPostWhen, outcome: d.autoPostOutcome, note: d.autoPostNote, decidedAt: d.autoPostDecidedAt } : null,
     rejectedReason: d.rejectedReason,
     notes: d.notes,
     sourceClipId: d.sourceClipId,
@@ -140,6 +150,7 @@ export function postView(p: PostRow) {
     error: p.error,
     attempts: p.attempts,
     connectedAccountId: p.connectedAccountId,
+    approvedVia: p.approvedVia,
   }
 }
 

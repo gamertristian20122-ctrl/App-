@@ -27,7 +27,7 @@ Rules every caller relies on:
   approvals it is a security boundary (below).
 - **MCP tool input schemas:** use the schemas in `@app/core/validation` (`z.toJSONSchema(schema, { io: 'input' })`).
   `ClipRequestSchema` now carries an optional `brandId` and at most 20 ranges.
-- **Browser code** imports only browser-safe subpaths: `@app/core/{types,plans,platforms,validation,links,time,errors,log}`.
+- **Browser code** imports only browser-safe subpaths: `@app/core/{types,plans,platforms,validation,links,time,errors,log,autopost}`.
 
 ### Approvals (nothing publishes without a human)
 

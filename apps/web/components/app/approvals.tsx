@@ -3,6 +3,7 @@
 // nonce issued server-side at render time; the server actions pass it to services.approvals with
 // { via: 'web' }. Approved drafts can be scheduled from here.
 
+import { AUTO_POST_OUTCOME_LABELS } from '@app/core/autopost'
 import { PLATFORM_RULES, type TextUnit } from '@app/core/platforms'
 import { PLATFORM_LABELS } from '@app/core/types'
 import { TIKTOK_PRIVACY_LABELS, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
@@ -27,7 +28,7 @@ export interface ApprovalActions {
   cancelPost: FormAction
 }
 
-const VIA_LABEL: Record<string, string> = { mcp: 'your AI', web: 'the web app', worker: 'a clip', system: 'the system' }
+const VIA_LABEL: Record<string, string> = { mcp: 'your AI', web: 'the web app', worker: 'a clip or render', system: 'the system' }
 
 /** Default schedule time: about an hour from now, on a quarter hour. */
 export function defaultScheduleIso(now: Date): string {
@@ -127,6 +128,7 @@ function PostsList({ posts, timezone, actions }: { posts: PostRow[]; timezone: s
           <span className="flex items-center gap-2">
             <PlatformBadge platform={p.platform} />
             <StatusPill status={p.status} />
+            {p.approvedVia === 'auto_post' ? <Badge tone="info">Auto-posted</Badge> : null}
             <time className="text-neutral-600 dark:text-neutral-400" dateTime={(p.publishedAt ?? p.scheduledFor).toISOString()}>
               {formatDateTime(p.publishedAt ?? p.scheduledFor, timezone, { zone: true })}
             </time>
@@ -178,11 +180,22 @@ export function DraftCard({ item, actions, now }: { item: ApprovalItem; actions:
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {item.focused ? <Badge tone="info">Opened from link</Badge> : null}
+          {draft.status === 'approved' && draft.approvedVia === 'auto_post' ? <Badge tone="info">Auto-posted</Badge> : null}
           <StatusPill status={draft.status} />
         </div>
       </header>
 
       {draft.notes ? <p className="mt-3 rounded-lg bg-neutral-50 p-3 text-sm dark:bg-neutral-950">{draft.notes}</p> : null}
+      {draft.status === 'draft' && draft.autoPostOutcome && draft.autoPostOutcome !== 'posted' ? (
+        <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400" data-testid="auto-post-note">
+          Not auto-posted: {AUTO_POST_OUTCOME_LABELS[draft.autoPostOutcome]}.
+        </p>
+      ) : null}
+      {draft.status === 'draft' && draft.autoPostRequestedAt && !draft.autoPostDecidedAt ? (
+        <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400" data-testid="auto-post-note">
+          Auto-post is waiting for the video to finish processing.
+        </p>
+      ) : null}
       {preview.problems.length > 0 ? (
         <Notice tone="warning" className="mt-4">
           <ul className="list-disc pl-5">

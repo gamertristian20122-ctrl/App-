@@ -55,7 +55,8 @@ export const MEDIA_KINDS = ['video', 'image', 'audio', 'captions'] as const
 export type MediaKind = (typeof MEDIA_KINDS)[number]
 export const MediaKindSchema = z.enum(MEDIA_KINDS)
 
-export const MEDIA_ORIGINS = ['upload', 'drive_link', 'clip', 'render'] as const
+/** url_import (0004): a finished video/image fetched from an https link an AI sent (post media only). */
+export const MEDIA_ORIGINS = ['upload', 'drive_link', 'clip', 'render', 'url_import'] as const
 export type MediaOrigin = (typeof MEDIA_ORIGINS)[number]
 export const MediaOriginSchema = z.enum(MEDIA_ORIGINS)
 
@@ -89,7 +90,8 @@ export const USAGE_KINDS = ['reserve', 'settle', 'release', 'adjust'] as const
 export type UsageKind = (typeof USAGE_KINDS)[number]
 export const UsageKindSchema = z.enum(USAGE_KINDS)
 
-export const ACTORS = ['web', 'mcp', 'worker', 'system'] as const
+/** auto_post (0004): the brand's Auto-post rule approved a draft (the person turned it on in the web app). */
+export const ACTORS = ['web', 'mcp', 'worker', 'system', 'auto_post'] as const
 export type Actor = (typeof ACTORS)[number]
 export const ActorSchema = z.enum(ACTORS)
 
@@ -130,6 +132,8 @@ export const JOB_TYPES = [
   'analytics_pull',
   'import_past_posts',
   'cleanup',
+  'code_video_render',
+  'url_import',
 ] as const
 export type JobType = (typeof JOB_TYPES)[number]
 export const JobTypeSchema = z.enum(JOB_TYPES)
@@ -149,6 +153,8 @@ export const JOB_GROUP: Readonly<Record<JobType, WorkerGroup>> = {
   clip_render: 'media',
   carousel_render: 'media',
   video_render: 'media',
+  code_video_render: 'media',
+  url_import: 'media',
 }
 
 /** A row of the `jobs` table as the DB layer returns it (camelCase, Date for timestamptz). */

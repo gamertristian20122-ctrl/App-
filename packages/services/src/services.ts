@@ -4,6 +4,7 @@ import { createAccountsService } from './accounts'
 import { createAnalyticsService } from './analytics'
 import { createApprovalsService } from './approvals'
 import { createAuditService } from './audit'
+import { createAutoPostService, decideWaitingForMediaIn } from './autopost'
 import { createBillingService } from './billing'
 import { createBrandsService } from './brands'
 import { createClipsService } from './clips'
@@ -28,16 +29,19 @@ export function createServices(deps: ServicesDeps) {
   const accounts = createAccountsService(ctx)
   const posts = createPostsService(ctx)
   const clips = createClipsService(ctx)
+  const autoPost = createAutoPostService(ctx, { drafts: draftsCore })
   return {
     users: createUsersService(ctx),
     brands: createBrandsService(ctx),
     accounts,
-    media: createMediaService(ctx),
+    media: createMediaService(ctx, { onReadyIn: (r, userId, media) => decideWaitingForMediaIn(ctx, r, userId, media) }),
     transcripts: createTranscriptsService(ctx),
     clips,
     /** drafts.approve is approvals.approve (a valid one-time nonce is always required). */
     drafts: { ...draftsCore, approve: approvals.approve },
     approvals,
+    /** The brand's Auto-post rule (publish_video, autoPublish on renders); the switch is brands.setAutoPost (web only). */
+    autoPost,
     posts,
     voice: createVoiceService(ctx),
     imports: createImportsService(ctx),

@@ -46,6 +46,7 @@ import {
   type Ctx,
 } from './context'
 import { requireCanCreate, userEntitlements } from './entitlements'
+import { ensureUploadsComplete } from './media'
 
 // ---------------------------------------------------------------------------------------------
 // Views
@@ -301,6 +302,8 @@ export function createDraftsService(ctx: Ctx) {
       const uid = userIdOf(userId)
       const data = fromZod(DraftInputSchema, input, 'Draft')
       const via = options.via ?? 'mcp'
+      // AI uploads (upload_media) are checked on first use: the file must be in storage
+      await ensureUploadsComplete(ctx, uid, data.variants.flatMap((v) => v.mediaIds), via)
       const created = await ctx.tx(async (r) => {
         const user = await requireUser(r, uid)
         requireCanCreate(userEntitlements(user, ctx.now()))

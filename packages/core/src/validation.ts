@@ -20,6 +20,8 @@ export const IdSchema = z
   .regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, 'Must be a UUID.')
   .transform((s) => s.toLowerCase())
 
+const utf8 = new TextEncoder()
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
 
@@ -455,6 +457,75 @@ export const ScheduleAtSchema = createScheduleAtSchema()
 export const ScheduleInputSchema = createScheduleInputSchema()
 export type ScheduleInput = z.output<typeof ScheduleInputSchema>
 
+// ---------------------------------------------------------------------------
+// Auto-post (docs/plans/02-auto-post.md)
+// ---------------------------------------------------------------------------
+
+/** A list of distinct platforms (1–9). */
+const PlatformListSchema = z
+  .array(PlatformSchema)
+  .min(1)
+  .max(PLATFORMS.length)
+  .refine((p) => new Set(p).size === p.length, 'List each platform once.')
+
+/**
+ * When an auto-posted draft publishes: "now" (the next minute), "best" (the next default slot per
+ * platform in the brand's time zone, @app/core/autopost) or an ISO 8601 time with an offset. The
+ * time is checked against the clock (not past, at most SCHEDULE_MAX_DAYS ahead) by services.
+ */
+export const AutoPublishWhenSchema = z.union([z.literal('now'), z.literal('best'), z.iso.datetime({ offset: true })])
+export type AutoPublishWhen = z.output<typeof AutoPublishWhenSchema>
+
+/**
+ * render_video / render_carousel / make_clips / render_code_video: publish the draft the render
+ * makes through the brand's Auto-post rule. Without the switch on (web app) it waits for approval.
+ */
+export const AutoPublishSchema = z.strictObject({
+  /** Only these platforms (default: every connected platform that takes the media). */
+  platforms: PlatformListSchema.optional(),
+  when: AutoPublishWhenSchema.default('now'),
+})
+export type AutoPublish = z.output<typeof AutoPublishSchema>
+
+/** The brand's Auto-post settings (web app only). */
+export const AutoPostSettingsSchema = z.strictObject({
+  enabled: z.boolean(),
+  /** Empty = every connected platform. */
+  platforms: z
+    .array(PlatformSchema)
+    .max(PLATFORMS.length)
+    .refine((p) => new Set(p).size === p.length, 'List each platform once.')
+    .default([]),
+  dailyMax: z.number().int().min(1, 'The daily limit is at least 1.').max(25, 'The daily limit is at most 25.').default(3),
+  /** Who can see auto-posted TikTok videos (TikTok requires the person to choose). */
+  tiktokPrivacy: z.enum(TIKTOK_PRIVACY_LEVELS).nullable().default(null),
+})
+export type AutoPostSettings = z.output<typeof AutoPostSettingsSchema>
+
+const PerPlatformTextSchema = z.strictObject({
+  text: textSchema(MAX_POST_TEXT).optional(),
+  title: lineSchema(0, MAX_TITLE).optional(),
+})
+
+/** publish_video: one finished video → a draft → posted by the Auto-post rule, or the approval card. */
+export const PublishVideoInputSchema = z
+  .strictObject({
+    brandId: IdSchema,
+    mediaId: IdSchema,
+    /** The post text for every platform (unless overridden). */
+    caption: textSchema(MAX_POST_TEXT).optional(),
+    /** Title for platforms that have one (YouTube requires it); default: the caption's first line. */
+    title: lineSchema(1, MAX_TITLE).optional(),
+    overrides: z.partialRecord(PlatformSchema, PerPlatformTextSchema).optional(),
+    platforms: PlatformListSchema.optional(),
+    when: AutoPublishWhenSchema.default('now'),
+  })
+  .refine(
+    (v) => v.caption !== undefined || v.title !== undefined || Object.values(v.overrides ?? {}).some((o) => o?.text !== undefined || o?.title !== undefined),
+    'Give a caption (or per-platform text in overrides).',
+  )
+export type PublishVideoInput = z.output<typeof PublishVideoInputSchema>
+
 export const PostStatusInputSchema = z
   .strictObject({ postId: IdSchema.optional(), draftId: IdSchema.optional() })
   .refine((v) => (v.postId === undefined) !== (v.draftId === undefined), 'Give either postId or draftId.')
@@ -519,6 +590,8 @@ export const ClipRequestSchema = z.strictObject({
     .min(1)
     .max(MAX_CLIP_RANGES, `Ask for at most ${MAX_CLIP_RANGES} clips at a time.`),
   captionStyle: z.enum(CAPTION_STYLES).default('bold'),
+  /** Publish each clip's draft through the brand's Auto-post rule when it is rendered. */
+  autoPublish: AutoPublishSchema.optional(),
 })
 export type ClipRequest = z.output<typeof ClipRequestSchema>
 
@@ -612,6 +685,51 @@ export const UploadRequestSchema = z
     }
   })
 
+/**
+ * upload_media (coding AIs): a finished file to post (never a clip source). `filename` is the local
+ * path the returned curl command uploads. Single presigned PUT only (at most 5 GB).
+ */
+export const AI_UPLOAD_KINDS = ['video', 'image', 'audio'] as const
+export const MAX_AI_UPLOAD_BYTES = 5_000_000_000
+
+export const AiUploadInputSchema = z
+  .strictObject({
+    brandId: IdSchema.optional(),
+    kind: z.enum(AI_UPLOAD_KINDS).optional(),
+    filename: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1024)
+      // eslint-disable-next-line no-control-regex
+      .refine((f) => !/[\u0000-\u001f\u007f]/.test(f), 'The file name may not contain control characters or line breaks.'),
+    contentType: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .refine((m) => {
+        const k = mediaKindForMime(m)
+        return k === 'video' || k === 'image' || k === 'audio'
+      }, `Use one of: ${[...ALLOWED_MIME.video, ...ALLOWED_MIME.image, ...ALLOWED_MIME.audio].join(', ')}.`),
+    bytes: z.number().int().min(1),
+  })
+  .superRefine((u, ctx) => {
+    const kind = mediaKindForMime(u.contentType)
+    if (!kind || kind === 'captions') return
+    if (u.kind && u.kind !== kind) ctx.addIssue({ code: 'custom', path: ['kind'], message: `${u.contentType} is a ${kind} type, not ${u.kind}.` })
+    const max = Math.min(MAX_UPLOAD_BYTES[kind], MAX_AI_UPLOAD_BYTES)
+    if (u.bytes > max) ctx.addIssue({ code: 'custom', path: ['bytes'], message: `Files of this type may be at most ${max.toLocaleString('en-US')} bytes.` })
+  })
+export type AiUploadInput = z.output<typeof AiUploadInputSchema>
+
+/** upload_media with sourceUrl: a finished video or image an AI tool rendered, at an https link. */
+export const ImportUrlInputSchema = z.strictObject({
+  brandId: IdSchema.optional(),
+  url: z.string().trim().min(1).max(2048),
+  kind: z.enum(['video', 'image']).default('video'),
+})
+export type ImportUrlInput = z.output<typeof ImportUrlInputSchema>
+
 /** A cloud-drive link to the user's own video. checkSourceUrl() (links.ts) enforces the host policy. */
 export const DriveLinkInputSchema = z.strictObject({
   brandId: IdSchema.optional(),
@@ -697,6 +815,7 @@ export const RenderCarouselInputSchema = z.strictObject({
   aspect: z.enum(['4:5', '1:1', '9:16']).default('4:5'),
   theme: ThemeSchema.optional(),
   slides: z.array(CarouselSlideSchema).min(1).max(RENDER_LIMITS.maxCarouselSlides),
+  autoPublish: AutoPublishSchema.optional(),
 })
 export type RenderCarouselInput = z.output<typeof RenderCarouselInputSchema>
 
@@ -722,6 +841,7 @@ export const RenderVideoInputSchema = z
     slides: z.array(VideoSlideSchema).min(1).max(RENDER_LIMITS.maxVideoSlides),
     audioMediaId: IdSchema.optional(),
     captions: z.boolean().default(true),
+    autoPublish: AutoPublishSchema.optional(),
   })
   .superRefine((v, ctx) => {
     const total = v.slides.reduce((sum, s) => sum + s.durationMs, 0)
@@ -734,6 +854,30 @@ export const RenderVideoInputSchema = z
     }
   })
 export type RenderVideoInput = z.output<typeof RenderVideoInputSchema>
+
+/** render_code_video: an HTML animation the AI wrote, rendered frame by frame to MP4. */
+export const CODE_VIDEO_LIMITS = {
+  maxHtmlBytes: 300_000,
+  minDurationMs: 1_000,
+  maxDurationMs: 60_000,
+} as const
+
+export const RenderCodeVideoInputSchema = z.strictObject({
+  brandId: IdSchema,
+  html: z
+    .string()
+    .min(1, 'Send the HTML document.')
+    .refine((h) => !h.includes('\u0000'), 'The HTML may not contain NUL characters.')
+    .refine((h) => utf8.encode(h).length <= CODE_VIDEO_LIMITS.maxHtmlBytes, `The HTML may be at most ${CODE_VIDEO_LIMITS.maxHtmlBytes / 1000} KB (inline images as small data: URIs or draw them with CSS/canvas).`),
+  durationMs: z.number().int().min(CODE_VIDEO_LIMITS.minDurationMs).max(CODE_VIDEO_LIMITS.maxDurationMs),
+  fps: z.union([z.literal(24), z.literal(30)]).default(30),
+  aspect: z.enum(['9:16', '1:1', '16:9']).default('9:16'),
+  audioMediaId: IdSchema.optional(),
+  title: lineSchema(1, MAX_TITLE).optional(),
+  caption: textSchema(MAX_POST_TEXT).optional(),
+  autoPublish: AutoPublishSchema.optional(),
+})
+export type RenderCodeVideoInput = z.output<typeof RenderCodeVideoInputSchema>
 
 /** Pixel size of a render for an aspect ratio. */
 export const RENDER_SIZES: Readonly<Record<string, { width: number; height: number }>> = {

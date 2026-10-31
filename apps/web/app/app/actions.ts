@@ -21,6 +21,7 @@ import {
   revokeAiConnection,
   saveVoiceProfile,
   saveVoiceProfileJson,
+  setAutoPost,
   syncAccounts,
   updateBrand,
 } from '@/lib/ui/actions/settings'
@@ -97,6 +98,11 @@ export async function archiveBrandAction(_prev: ActionResult, fd: FormData): Pro
 
 export async function restoreBrandAction(_prev: ActionResult, fd: FormData): Promise<ActionResult> {
   return runAction(({ services, userId }) => restoreBrand(services, userId, fd))
+}
+
+/** The brand's Auto-post switch: only the signed-in owner, only here (services refuse MCP/workers). */
+export async function autoPostAction(_prev: ActionResult, fd: FormData): Promise<ActionResult> {
+  return runAction(({ services, userId }) => setAutoPost(services, userId, fd))
 }
 
 export async function connectAccountAction(_prev: ActionResult, fd: FormData): Promise<ActionResult> {

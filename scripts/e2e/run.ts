@@ -11,6 +11,8 @@
 //             schedule → worker publishes via the fake provider, clips, carousel, voice, analytics
 //   media     ffmpeg test video → /api/uploads presign → PUT → complete → ingest → transcript →
 //             make_clips → 1080x1920 clips with audio → drafts; carousel → JPEG slides
+//   auto-post the person turns on Auto-post on the Brands page; the AI sends a video
+//             (upload_media → its curl command → publish_video) and the worker publishes it
 //   security  /api/mcp without a token → 401 + WWW-Authenticate resource_metadata; refresh-token
 //             reuse revokes the family
 //
@@ -28,7 +30,7 @@ import { ensureBrowsersPath, playwright, type Browser, type BrowserContext, type
 import { makeTestVideo, probe } from './lib/media'
 import { callOk, callTool, connectWithOAuth, structured, textOf, type McpSession, type ToolResult } from './lib/mcp'
 import { startCallbackServer } from './lib/oauth'
-import { onStop, stopAll } from './lib/procs'
+import { onStop, run, stopAll } from './lib/procs'
 import { assertHealthyPage, capture, openCardHarness, save, shots, SHOTS_DIR, watchPage } from './lib/screens'
 import { assert, assertEqual, assertMatch, check, formatBytes, freePort, log, passed, REPO, sleep, waitFor } from './lib/util'
 
@@ -63,6 +65,9 @@ const V1_TOOLS = [
   'render_carousel',
   'render_video',
   'get_analytics',
+  'upload_media',
+  'render_code_video',
+  'publish_video',
 ]
 const CARD_URI = 'ui://approval-card/v1'
 
@@ -83,6 +88,8 @@ interface Ctx {
   clipIds: string[]
   clipDraftIds: string[]
   carouselDraftId?: string
+  /** The publish_video draft the Auto-post rule posts. */
+  autoDraftId?: string
 }
 
 const call = (ctx: Ctx, name: string, a: Record<string, unknown>) => callOk(ctx.client, name, a)
@@ -142,6 +149,8 @@ async function checkToolList(ctx: Ctx): Promise<void> {
     assertEqual(byName.get(ro)?.annotations?.readOnlyHint, true, `${ro} readOnlyHint`)
   }
   assertEqual(byName.get('schedule_post')?.annotations?.destructiveHint, true, 'schedule_post destructiveHint')
+  assertEqual(byName.get('publish_video')?.annotations?.destructiveHint, true, 'publish_video destructiveHint')
+  assertEqual((byName.get('publish_video')?._meta as { ui?: { resourceUri?: string } } | undefined)?.ui?.resourceUri, CARD_URI, 'publish_video renders the card')
   const cardMeta = byName.get('approve_draft')?._meta as { ui?: { resourceUri?: string }; 'openai/outputTemplate'?: string } | undefined
   assertEqual(cardMeta?.ui?.resourceUri, CARD_URI, 'approve_draft _meta.ui.resourceUri')
   assertEqual(cardMeta?.['openai/outputTemplate'], CARD_URI, 'approve_draft openai/outputTemplate')
@@ -282,10 +291,91 @@ async function waitPublished(ctx: Ctx): Promise<void> {
     assert(p.publishedAt && new Date(p.publishedAt).getTime() >= due - 1_000, `${p.platform} published before its time`)
   }
   const jobs = await ctx.app.db.query<{ type: string; status: string }>(
-    `select type, status from jobs where user_id = $1 and type in ('publish_post','check_post_status') order by created_at`,
-    [ctx.userId],
+    `select j.type, j.status from jobs j join posts p on p.id::text = j.payload->>'postId'
+      where j.user_id = $1 and p.draft_id = $2 and j.type in ('publish_post','check_post_status') order by j.created_at`,
+    [ctx.userId, draftId],
   )
   assert(jobs.filter((j) => j.type === 'publish_post' && j.status === 'succeeded').length === 2, 'publish_post jobs did not succeed')
+}
+
+// ---------------------------------------------------------------------------------------------
+// Auto-post: the person turns it on in the web app; the AI sends a video; the worker publishes it
+// ---------------------------------------------------------------------------------------------
+
+async function autoPostFlow(ctx: Ctx): Promise<void> {
+  // The AI cannot turn Auto-post on (services refuse anything but the web app); the person does,
+  // on the Brands page: switch on, TikTok + Instagram only, daily limit 3, TikTok privacy chosen.
+  const { page } = ctx
+  await page.goto('/app/brands', { waitUntil: 'networkidle' })
+  const form = page.getByRole('form', { name: 'Auto-post for Acme Studio' })
+  await form.waitFor({ timeout: 15_000 })
+  assertMatch(await page.locator('main').innerText(), /When this is on, videos your AI sends are posted without asking you\. Platform limits still apply\./, 'Auto-post warning')
+  await form.getByRole('switch').check()
+  await form.getByLabel('TikTok', { exact: true }).check()
+  await form.getByLabel('Instagram', { exact: true }).check()
+  await form.getByLabel('Most auto-posts per day').fill('3')
+  await form.getByLabel('Who can see auto-posted TikTok videos').selectOption('PUBLIC_TO_EVERYONE')
+  await form.getByRole('button', { name: 'Save Auto-post' }).click()
+  const brand = await waitFor('Auto-post to be saved', async () => {
+    const row = await ctx.app.db.one<{ auto_post_enabled: boolean; platforms: string[]; auto_post_daily_max: number; auto_post_tiktok_privacy: string | null }>(
+      `select auto_post_enabled, auto_post_platforms::text[] as platforms, auto_post_daily_max, auto_post_tiktok_privacy from brands where id = $1`,
+      [ctx.brandId],
+    )
+    return row?.auto_post_enabled ? row : undefined
+  })
+  assertEqual([...brand.platforms].sort().join(','), 'instagram,tiktok', 'Auto-post platforms')
+  assertEqual(brand.auto_post_tiktok_privacy, 'PUBLIC_TO_EVERYONE', 'Auto-post TikTok privacy')
+  const audit = await ctx.app.db.one<{ actor: string }>(`select actor from audit_log where subject_id = $1 and action = 'brand.auto_post_enabled'`, [ctx.brandId])
+  assertEqual(audit?.actor, 'web', 'Auto-post switch audit actor')
+  const listed = structured<{ brands: Array<{ id: string; autoPost: { enabled: boolean } }> }>(await call(ctx, 'list_accounts', {}))
+  assert(listed.brands.find((b) => b.id === ctx.brandId)?.autoPost.enabled === true, 'list_accounts shows Auto-post on (read-only)')
+
+  // The AI (a coding assistant): upload_media → run its curl command → publish_video
+  const file = join(RUN_DIR, 'auto-post.mp4')
+  await makeTestVideo(file, 6)
+  const bytes = statSync(file).size
+  const up = await call(ctx, 'upload_media', { brandId: ctx.brandId, filename: 'auto-post.mp4', contentType: 'video/mp4', bytes })
+  const upload = structured<{ mediaId: string; uploadUrl: string; headers: Record<string, string>; curl: string }>(up)
+  assertMatch(upload.curl, /^curl --fail --silent --show-error -X PUT -H 'Content-Type: video\/mp4' --upload-file 'auto-post\.mp4' '/, 'upload_media curl command')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/proxy/i.test(k))) as NodeJS.ProcessEnv
+  await run('sh', ['-c', upload.curl], { cwd: RUN_DIR, env, timeoutMs: 60_000 })
+
+  const published = await call(ctx, 'publish_video', {
+    brandId: ctx.brandId,
+    mediaId: upload.mediaId,
+    caption: 'Six seconds of test pattern, posted by Auto-post.',
+    title: 'Auto-post e2e',
+    platforms: ['tiktok', 'instagram'],
+    when: 'now',
+  })
+  const result = structured<{ draftId: string; outcome: string; autoPosted: boolean }>(published)
+  // the upload is probed by the worker first; the rule decides when it is ready
+  assert(result.outcome === 'waiting_for_media' || result.outcome === 'posted', `publish_video outcome: ${result.outcome}: ${textOf(published)}`)
+  ctx.autoDraftId = result.draftId
+  log(`publish_video: ${textOf(published).split('\n')[0]}`)
+}
+
+async function waitAutoPublished(ctx: Ctx): Promise<void> {
+  const draftId = ctx.autoDraftId as string
+  const posts = await waitFor(
+    'the worker to publish the auto-posted video',
+    async () => {
+      const r = await call(ctx, 'post_status', { draftId })
+      const list = structured<{ posts: Array<{ platform: string; status: string; postUrl: string | null; approvedVia: string; error: string | null }> }>(r).posts
+      const failed = list.find((p) => p.status === 'failed')
+      assert(!failed, `auto-posted ${failed?.platform} failed: ${failed?.error}`)
+      return list.length === 2 && list.every((p) => p.status === 'published') ? list : undefined
+    },
+    { timeoutMs: 180_000, intervalMs: 2_000 },
+  )
+  assertEqual(posts.map((p) => p.platform).sort().join(','), 'instagram,tiktok', 'auto-posted platforms')
+  assert(posts.every((p) => p.approvedVia === 'auto_post' && p.postUrl && /^https:\/\//.test(p.postUrl)), 'auto-posted posts carry approvedVia auto_post and a URL')
+  const draft = await ctx.app.db.one<{ status: string; approved_via: string; auto_post_outcome: string }>(`select status, approved_via, auto_post_outcome from drafts where id = $1`, [draftId])
+  assertEqual(draft?.approved_via, 'auto_post', 'draft approved via the Auto-post rule')
+  assertEqual(draft?.auto_post_outcome, 'posted', 'Auto-post outcome')
+  // the person sees it marked in the calendar
+  await ctx.page.goto('/app/calendar', { waitUntil: 'networkidle' })
+  assertMatch(await ctx.page.locator('main').innerText(), /Auto-posted/, 'calendar shows the Auto-posted badge')
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -762,10 +852,12 @@ async function main(): Promise<void> {
     await check('MCP: refresh token (forced 401 → SDK refresh → rotation)', () => checkRefresh(ctx))
     await check('MCP: connect_account + list_accounts (fake provider)', () => connectAccounts(ctx))
     await check('MCP: create_draft (X link refused), approve_draft card + nonce, approval_decide, schedule_post', () => draftApproveSchedule(ctx))
+    await check('auto-post: switch on in the web app, upload_media + curl, publish_video', () => autoPostFlow(ctx))
     await check('clips: upload → ingest → transcript → make_clips → 1080x1920 drafts, usage', () => clipFlow(ctx))
     await check('render_carousel → JPEG slides → draft', () => carouselFlow(ctx))
     await check('voice profile, write_post, import_past_posts, get_analytics, weekly_review', () => voiceAndAnalytics(ctx))
     await check(`worker publishes the scheduled post via the fake provider (scheduled +${SCHEDULE_DELAY_SEC}s)`, () => waitPublished(ctx))
+    await check('auto-post: the worker publishes the video via the fake provider (approved via auto_post)', () => waitAutoPublished(ctx))
     await check('web: a YouTube drive link is refused (client and server)', () => driveLinkRefused(ctx))
     await check('approval card in an MCP Apps host harness (Approve → approval_decide)', () => cardHarness(ctx))
     await check('web: /approve/[nonce] one-click approval', () => webApproval(ctx))

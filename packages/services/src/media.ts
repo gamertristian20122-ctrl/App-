@@ -1,15 +1,17 @@
 // Media: browser uploads (presigned PUT, or multipart above 5 GB), cloud-drive links for clip
 // sources (allowlisted hosts only; never YouTube or other video sites), and the worker's ingest
 // result. Users may only clip their own content: clip sources need a rights attestation.
+// AI uploads (upload_media: a presigned PUT of a finished file) and URL imports (an https link to a
+// finished video/image, fetched by the worker) are post media only, never clip sources.
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { AppError, isAppError } from '@app/core/errors'
-import { checkSourceUrl, redactUrl } from '@app/core/links'
+import { checkImportUrl, checkSourceUrl, redactUrl } from '@app/core/links'
 import { SOURCE_LIMITS } from '@app/core/plans'
 import type { Actor, MediaKind, MediaStatus } from '@app/core/types'
 import { MediaKindSchema, MediaStatusSchema } from '@app/core/types'
-import { DriveLinkInputSchema, IdSchema, UploadRequestSchema, mediaKindForMime } from '@app/core/validation'
+import { AiUploadInputSchema, DriveLinkInputSchema, IdSchema, ImportUrlInputSchema, UploadRequestSchema, mediaKindForMime } from '@app/core/validation'
 import type { BoundRepos, MediaRow } from '@app/db'
 import {
   MAX_SINGLE_PUT_BYTES,
@@ -114,18 +116,174 @@ export interface IngestResult {
   error?: string
 }
 
-export function createMediaService(ctx: Ctx) {
-  async function failIn(r: BoundRepos, userId: string, media: MediaRow, message: string, actor: Actor): Promise<MediaRow> {
-    const row = await r.media.update(userId, media.id, { status: 'failed', sourceUrl: null })
-    if (isClipSource(media)) await releaseIn(r, userId, { reserveKey: clipReserveKey(media.id), subjectId: media.id, note: 'ingest failed' })
-    await auditIn(r, userId, {
-      actor,
-      action: 'media.failed',
-      subjectType: 'media',
-      subjectId: media.id,
-      meta: { reason: message.slice(0, 300) },
+/** Called in markIngested's transaction once a media item became ready (wired to the Auto-post rule). */
+export type MediaReadyHook = (r: BoundRepos, userId: string, media: MediaRow) => Promise<void>
+
+async function failMediaIn(r: BoundRepos, userId: string, media: MediaRow, message: string, actor: Actor): Promise<MediaRow> {
+  const row = await r.media.update(userId, media.id, { status: 'failed', sourceUrl: null })
+  if (isClipSource(media)) await releaseIn(r, userId, { reserveKey: clipReserveKey(media.id), subjectId: media.id, note: 'ingest failed' })
+  await auditIn(r, userId, {
+    actor,
+    action: 'media.failed',
+    subjectType: 'media',
+    subjectId: media.id,
+    meta: { reason: message.slice(0, 300) },
+  })
+  return row ?? media
+}
+
+/**
+ * Finishes an upload (shared by completeUpload and the "first use" check of AI uploads): the
+ * stored object must exist and match the declared size and type; images become ready, videos and
+ * audio go to the ingest worker. Idempotent once ready.
+ */
+async function completeUploadWith(
+  ctx: Ctx,
+  uid: string,
+  media: MediaRow,
+  data: { uploadId?: string | undefined; parts?: unknown[] | undefined },
+  via: Actor,
+): Promise<{ media: MediaView; ingestQueued: boolean }> {
+  if (media.origin !== 'upload') throw validation('This media was not uploaded from a browser.')
+  if (media.status === 'ready') return { media: mediaView(media), ingestQueued: false }
+  if (media.status === 'failed') throw conflict('This upload failed. Start a new upload.')
+
+  if (data.uploadId) {
+    const storage = ctx.storage
+    if (!supportsMultipart(storage)) throw validation('Multipart uploads are not supported by this storage.')
+    let parts
+    try {
+      parts = checkCompletedParts(data.parts ?? [])
+    } catch (error) {
+      throw validation(isAppError(error) ? error.message : 'Invalid part list.')
+    }
+    await storage.completeMultipartUpload(media.storageKey, data.uploadId, parts)
+  }
+
+  const head = await ctx.storage.head(media.storageKey)
+  if (!head) {
+    throw validation(`The file for media ${media.id} has not been uploaded yet. Upload it (the PUT from upload_media), then try again.`, {
+      mediaId: media.id,
+      reason: 'not_uploaded',
     })
-    return row ?? media
+  }
+  const declaredType = baseMime(media.mimeType ?? '')
+  const problem =
+    media.bytes !== null && head.bytes !== media.bytes
+      ? `The uploaded file does not match the declared size (declared ${media.bytes} bytes, received ${head.bytes}).`
+      : declaredType && baseMime(head.contentType) !== declaredType
+        ? 'The uploaded file does not match the declared type.'
+        : null
+  if (problem) {
+    await ctx.storage.delete(media.storageKey).catch(() => undefined)
+    await ctx.tx((r) => failMediaIn(r, uid, media, problem, via))
+    throw validation(`${problem} Start a new upload with the exact size and type.`, { mediaId: media.id })
+  }
+
+  return ctx.tx(async (r) => {
+    if (media.kind === 'video' || media.kind === 'audio') {
+      const row = await r.media.update(uid, media.id, { bytes: head.bytes })
+      await enqueueJob(r, {
+        type: 'source_ingest',
+        payload: { userId: uid, mediaId: media.id },
+        idempotencyKey: `source_ingest:${media.id}`,
+      })
+      await auditIn(r, uid, { actor: via, action: 'media.uploaded', subjectType: 'media', subjectId: media.id })
+      return { media: mediaView(row ?? media), ingestQueued: true }
+    }
+    const row = await r.media.update(uid, media.id, { status: 'ready', bytes: head.bytes })
+    await auditIn(r, uid, { actor: via, action: 'media.uploaded', subjectType: 'media', subjectId: media.id })
+    return { media: mediaView(row ?? media), ingestQueued: false }
+  })
+}
+
+/**
+ * "Completion on first use" (create_draft, publish_video): pending uploads among `mediaIds` are
+ * completed now (storage.head must find the file), unless their ingest is already queued. Ids that
+ * are not the user's are left for the caller's own checks (not_found).
+ */
+export async function ensureUploadsComplete(ctx: Ctx, uid: string, mediaIds: readonly string[], via: Actor): Promise<void> {
+  const ids = [...new Set(mediaIds)].filter((m) => IdSchema.safeParse(m).success)
+  if (ids.length === 0) return
+  const rows = await ctx.repos.media.getMany(uid, ids)
+  for (const media of rows) {
+    if (media.status !== 'pending' || media.origin !== 'upload') continue
+    if (await ctx.repos.jobs.getByIdempotencyKey(`source_ingest:${media.id}`)) continue
+    await completeUploadWith(ctx, uid, media, {}, via)
+  }
+}
+
+export function createMediaService(ctx: Ctx, deps: { onReadyIn?: MediaReadyHook } = {}) {
+  const failIn = failMediaIn
+
+  /** Creates the pending media row and the presigned PUT (or multipart parts above 5 GB). */
+  async function startUpload(
+    uid: string,
+    data: { brandId?: string | undefined; contentType: string; bytes: number },
+    kind: MediaKind,
+    purpose: UploadPurpose,
+    via: Actor,
+  ): Promise<CreateUploadResult> {
+    const ext = extForMime(data.contentType) ?? 'bin'
+    const key = uploadKey(uid, randomUUID(), ext)
+
+    const media = await ctx.tx(async (r) => {
+      const user = await requireUser(r, uid, true)
+      const ent = userEntitlements(user, ctx.now())
+      requireCanCreate(ent)
+      if (purpose === 'clip_source') requireCanProcessMedia(ent)
+      if (data.brandId) await requireActiveBrand(r, uid, data.brandId)
+      const stored = await r.media.storageBytes(uid)
+      if (stored + data.bytes > ent.storageBytes) {
+        throw new AppError('limit_exceeded', 'Your storage is full. Delete old media to make room.', {
+          limit: ent.storageBytes,
+          used: stored,
+          remaining: Math.max(0, ent.storageBytes - stored),
+          requested: data.bytes,
+        })
+      }
+      const row = await r.media.create(uid, {
+        brandId: data.brandId ?? null,
+        kind,
+        origin: 'upload',
+        status: 'pending',
+        storageKey: key,
+        mimeType: data.contentType,
+        bytes: data.bytes,
+        rightsAttestedAt: purpose === 'clip_source' ? ctx.now() : null,
+      })
+      await auditIn(r, uid, {
+        actor: via,
+        action: 'media.upload_started',
+        subjectType: 'media',
+        subjectId: row.id,
+        meta: { kind, bytes: data.bytes, purpose },
+      })
+      return row
+    })
+
+    const ttl = ctx.config.uploadUrlTtlSec
+    const expiresAt = new Date(ctx.now().getTime() + ttl * 1000).toISOString()
+    if (data.bytes <= MAX_SINGLE_PUT_BYTES) {
+      const put = await ctx.storage.presignPut(key, data.contentType, data.bytes)
+      return {
+        media: mediaView(media),
+        upload: { mode: 'single', method: 'PUT', url: put.url, headers: put.headers, bytes: data.bytes, expiresAt },
+      }
+    }
+    const storage = ctx.storage
+    if (!supportsMultipart(storage)) throw validation('Files over 5 GB are not supported by this storage.')
+    const plan = planParts(data.bytes)
+    const { uploadId } = await storage.createMultipartUpload(key, data.contentType)
+    const parts = []
+    for (const part of plan) {
+      const put = await storage.presignUploadPart(key, uploadId, part.partNumber, part.bytes, ttl)
+      parts.push({ partNumber: part.partNumber, bytes: part.bytes, url: put.url, headers: put.headers })
+    }
+    return {
+      media: mediaView(media),
+      upload: { mode: 'multipart', uploadId, partBytes: plan[0]?.bytes ?? data.bytes, parts, expiresAt },
+    }
   }
 
   /** Best effort: removes the file of a media row that failed (the row stays for lineage). */
@@ -152,66 +310,73 @@ export function createMediaService(ctx: Ctx) {
           throw validation('Confirm that you own this video or have the rights to use it.', { field: 'rightsAttested' })
         }
       }
-      const ext = extForMime(data.contentType) ?? 'bin'
-      const key = uploadKey(uid, randomUUID(), ext)
+      return startUpload(uid, { brandId: data.brandId, contentType: data.contentType, bytes: data.bytes }, kind, purpose, options.via ?? 'web')
+    },
 
-      const media = await ctx.tx(async (r) => {
+    /**
+     * upload_media (coding AIs): a presigned PUT for a finished video, image or audio file to post.
+     * Post media only (no rights attestation, never a clip source: clip sources still need the web
+     * app's rights checkbox). The file is checked (storage.head: size and type) when it is first
+     * used by create_draft / publish_video, or by completeUpload.
+     */
+    async createAiUpload(userId: string, input: unknown, options: { via?: Actor } = {}): Promise<CreateUploadResult> {
+      const uid = userIdOf(userId)
+      const data = fromZod(AiUploadInputSchema, input, 'Upload')
+      const kind = mediaKindForMime(data.contentType) as MediaKind
+      if (data.bytes > MAX_SINGLE_PUT_BYTES) throw validation('Files sent by an AI may be at most 5 GB.', { field: 'bytes' })
+      return startUpload(uid, { brandId: data.brandId, contentType: data.contentType, bytes: data.bytes }, kind, 'post', options.via ?? 'mcp')
+    },
+
+    /**
+     * upload_media with sourceUrl: a finished video or image another AI tool rendered, at an https
+     * link. Refuses video and social sites (users may only post their own videos), IP literals and
+     * private hosts; the worker (url_import) downloads it with every redirect hop re-checked, public
+     * IP addresses only, a size cap and video/image content types only. Post media, never a clip
+     * source; no clipping time is charged.
+     */
+    async importFromUrl(userId: string, input: unknown, options: { via?: Actor } = {}): Promise<{ media: MediaView }> {
+      const uid = userIdOf(userId)
+      const data = fromZod(ImportUrlInputSchema, input, 'Link')
+      const check = checkImportUrl(data.url)
+      if (!check.ok) {
+        ctx.log.info('import link refused', { reason: check.reason, url: redactUrl(data.url) })
+        throw new AppError('validation', check.message, { reason: check.reason, field: 'url' })
+      }
+      return ctx.tx(async (r) => {
         const user = await requireUser(r, uid, true)
         const ent = userEntitlements(user, ctx.now())
         requireCanCreate(ent)
-        if (purpose === 'clip_source') requireCanProcessMedia(ent)
         if (data.brandId) await requireActiveBrand(r, uid, data.brandId)
         const stored = await r.media.storageBytes(uid)
-        if (stored + data.bytes > ent.storageBytes) {
-          throw new AppError('limit_exceeded', 'Your storage is full. Delete old media to make room.', {
-            limit: ent.storageBytes,
-            used: stored,
-            remaining: Math.max(0, ent.storageBytes - stored),
-            requested: data.bytes,
+        if (stored >= ent.storageBytes) {
+          throw new AppError('limit_exceeded', 'Your storage is full. Delete old media to make room.', { limit: ent.storageBytes, used: stored, remaining: 0 })
+        }
+        const pending = await r.media.list(uid, { origin: 'url_import', status: 'pending', limit: ctx.config.maxPendingUrlImports })
+        if (pending.length >= ctx.config.maxPendingUrlImports) {
+          throw new AppError('limit_exceeded', `${pending.length} links are still being fetched. Wait until they are done, then send more.`, {
+            pending: pending.length,
+            limit: ctx.config.maxPendingUrlImports,
           })
         }
         const row = await r.media.create(uid, {
           brandId: data.brandId ?? null,
-          kind,
-          origin: 'upload',
+          kind: data.kind,
+          origin: 'url_import',
           status: 'pending',
-          storageKey: key,
-          mimeType: data.contentType,
-          bytes: data.bytes,
-          rightsAttestedAt: purpose === 'clip_source' ? ctx.now() : null,
+          storageKey: uploadKey(uid, randomUUID(), data.kind === 'video' ? 'mp4' : 'jpg'),
+          sourceHost: check.host,
+          sourceUrl: check.url,
         })
+        await enqueueJob(r, { type: 'url_import', payload: { userId: uid, mediaId: row.id }, idempotencyKey: `url_import:${row.id}` })
         await auditIn(r, uid, {
-          actor: options.via ?? 'web',
-          action: 'media.upload_started',
+          actor: options.via ?? 'mcp',
+          action: 'media.url_import_requested',
           subjectType: 'media',
           subjectId: row.id,
-          meta: { kind, bytes: data.bytes, purpose },
+          meta: { host: check.host, kind: data.kind },
         })
-        return row
+        return { media: mediaView(row) }
       })
-
-      const ttl = ctx.config.uploadUrlTtlSec
-      const expiresAt = new Date(ctx.now().getTime() + ttl * 1000).toISOString()
-      if (data.bytes <= MAX_SINGLE_PUT_BYTES) {
-        const put = await ctx.storage.presignPut(key, data.contentType, data.bytes)
-        return {
-          media: mediaView(media),
-          upload: { mode: 'single', method: 'PUT', url: put.url, headers: put.headers, bytes: data.bytes, expiresAt },
-        }
-      }
-      const storage = ctx.storage
-      if (!supportsMultipart(storage)) throw validation('Files over 5 GB are not supported by this storage.')
-      const plan = planParts(data.bytes)
-      const { uploadId } = await storage.createMultipartUpload(key, data.contentType)
-      const parts = []
-      for (const part of plan) {
-        const put = await storage.presignUploadPart(key, uploadId, part.partNumber, part.bytes, ttl)
-        parts.push({ partNumber: part.partNumber, bytes: part.bytes, url: put.url, headers: put.headers })
-      }
-      return {
-        media: mediaView(media),
-        upload: { mode: 'multipart', uploadId, partBytes: plan[0]?.bytes ?? data.bytes, parts, expiresAt },
-      }
     },
 
     /**
@@ -228,52 +393,7 @@ export function createMediaService(ctx: Ctx) {
       const uid = userIdOf(userId)
       const data = fromZod(CompleteUploadSchema, input ?? {}, 'Upload completion')
       const media = await requireMedia(ctx.repos, uid, mediaId)
-      if (media.origin !== 'upload') throw validation('This media was not uploaded from a browser.')
-      if (media.status === 'ready') return { media: mediaView(media), ingestQueued: false }
-      if (media.status === 'failed') throw conflict('This upload failed. Start a new upload.')
-
-      if (data.uploadId) {
-        const storage = ctx.storage
-        if (!supportsMultipart(storage)) throw validation('Multipart uploads are not supported by this storage.')
-        let parts
-        try {
-          parts = checkCompletedParts(data.parts ?? [])
-        } catch (error) {
-          throw validation(isAppError(error) ? error.message : 'Invalid part list.')
-        }
-        await storage.completeMultipartUpload(media.storageKey, data.uploadId, parts)
-      }
-
-      const head = await ctx.storage.head(media.storageKey)
-      if (!head) throw validation('The file has not been uploaded yet. Upload it, then try again.')
-      const declaredType = baseMime(media.mimeType ?? '')
-      const problem =
-        media.bytes !== null && head.bytes !== media.bytes
-          ? 'The uploaded file does not match the declared size.'
-          : declaredType && baseMime(head.contentType) !== declaredType
-            ? 'The uploaded file does not match the declared type.'
-            : null
-      if (problem) {
-        await ctx.storage.delete(media.storageKey).catch(() => undefined)
-        await ctx.tx((r) => failIn(r, uid, media, problem, options.via ?? 'web'))
-        throw validation(problem)
-      }
-
-      return ctx.tx(async (r) => {
-        if (media.kind === 'video' || media.kind === 'audio') {
-          const row = await r.media.update(uid, media.id, { bytes: head.bytes })
-          await enqueueJob(r, {
-            type: 'source_ingest',
-            payload: { userId: uid, mediaId: media.id },
-            idempotencyKey: `source_ingest:${media.id}`,
-          })
-          await auditIn(r, uid, { actor: options.via ?? 'web', action: 'media.uploaded', subjectType: 'media', subjectId: media.id })
-          return { media: mediaView(row ?? media), ingestQueued: true }
-        }
-        const row = await r.media.update(uid, media.id, { status: 'ready', bytes: head.bytes })
-        await auditIn(r, uid, { actor: options.via ?? 'web', action: 'media.uploaded', subjectType: 'media', subjectId: media.id })
-        return { media: mediaView(row ?? media), ingestQueued: false }
-      })
+      return completeUploadWith(ctx, uid, media, data, options.via ?? 'web')
     },
 
     /**
@@ -476,7 +596,7 @@ export function createMediaService(ctx: Ctx) {
             ...(data.height ? { height: data.height } : {}),
             ...(data.mimeType ? { mimeType: data.mimeType } : {}),
             ...(data.sha256 ? { sha256: data.sha256 } : {}),
-            ...(media.origin === 'drive_link' ? { sourceUrl: null } : {}),
+            ...(media.origin === 'drive_link' || media.origin === 'url_import' ? { sourceUrl: null } : {}),
           })
           if (clipSource) {
             await enqueueJob(r, {
@@ -492,6 +612,8 @@ export function createMediaService(ctx: Ctx) {
             subjectId: media.id,
             meta: { durationMs: durationMs ?? null, clipSource },
           })
+          // drafts that asked for Auto-post while this file was processing are decided now
+          if (row && deps.onReadyIn) await deps.onReadyIn(r, uid, row)
           return { media: mediaView(row ?? media), transcribe: clipSource }
         })
       } catch (error) {

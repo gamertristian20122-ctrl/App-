@@ -315,6 +315,8 @@ export interface BrandsData {
   limit: number
   entitlements: UserEntitlements
   accountsByBrand: Record<string, number>
+  /** Platforms with an active account, per brand (the Auto-post form marks them). */
+  platformsByBrand: Record<string, Platform[]>
 }
 
 export async function loadBrands(services: Services, userId: string): Promise<BrandsData> {
@@ -324,7 +326,11 @@ export async function loadBrands(services: Services, userId: string): Promise<Br
     services.accounts.list(userId, {}),
   ])
   const accountsByBrand: Record<string, number> = {}
-  for (const a of accounts) if ((LIVE_ACCOUNT_STATUSES as readonly string[]).includes(a.status)) accountsByBrand[a.brandId] = (accountsByBrand[a.brandId] ?? 0) + 1
+  const platformsByBrand: Record<string, Platform[]> = {}
+  for (const a of accounts) {
+    if ((LIVE_ACCOUNT_STATUSES as readonly string[]).includes(a.status)) accountsByBrand[a.brandId] = (accountsByBrand[a.brandId] ?? 0) + 1
+    if (a.status === 'active') platformsByBrand[a.brandId] = [...(platformsByBrand[a.brandId] ?? []), a.platform]
+  }
   const order = { active: 0, suspended: 1, archived: 2 } as const
   return {
     brands: [...brands].sort((a, b) => order[a.status] - order[b.status] || a.createdAt.getTime() - b.createdAt.getTime()),
@@ -332,6 +338,7 @@ export async function loadBrands(services: Services, userId: string): Promise<Br
     limit: ent.brands,
     entitlements: ent,
     accountsByBrand,
+    platformsByBrand,
   }
 }
 

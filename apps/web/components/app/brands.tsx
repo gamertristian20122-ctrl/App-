@@ -1,8 +1,14 @@
-// Brands: create (within the plan's limit), rename / change time zone, archive and restore.
+// Brands: create (within the plan's limit), rename / change time zone, archive and restore, and the
+// Auto-post switch (videos the user's AI sends are posted without asking; only changed here).
 
+import { AUTO_POST_DAILY_MAX, BEST_TIME_SLOTS } from '@app/core/autopost'
+import { PLATFORM_RULES } from '@app/core/platforms'
+import { PLATFORMS, PLATFORM_LABELS, type Platform } from '@app/core/types'
+import { TIKTOK_PRIVACY_LABELS, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
+import type { BrandRow } from '@app/db'
 import { ActionForm, SubmitButton, type FormAction } from '@/components/ui/action-form'
-import { Card, LinkButton, Meter, Notice, PageHeader, StatusPill } from '@/components/ui/primitives'
-import { cx, input, label } from '@/components/ui/styles'
+import { Badge, Card, LinkButton, Meter, Notice, PageHeader, StatusPill } from '@/components/ui/primitives'
+import { cx, hint, input, label } from '@/components/ui/styles'
 import type { BrandsData } from '@/lib/ui/data'
 import { formatDate, plural } from '@/lib/ui/format'
 import { timeZoneOptions } from '@/lib/ui/time'
@@ -13,6 +19,88 @@ export interface BrandActions {
   update: FormAction
   archive: FormAction
   restore: FormAction
+  autoPost: FormAction
+}
+
+/** The warning shown with the switch (also checked by the e2e run). */
+export const AUTO_POST_WARNING = 'When this is on, videos your AI sends are posted without asking you. Platform limits still apply.'
+
+const VIDEO_PLATFORMS = PLATFORMS.filter((p) => PLATFORM_RULES[p].video !== null)
+
+/** Auto-post: switch, platforms (none ticked = every connected one), daily limit, TikTok privacy. */
+function AutoPostForm({ brand, connected, action }: { brand: BrandRow; connected: readonly Platform[]; action: FormAction }) {
+  const base = `auto-${brand.id}`
+  const list = brand.autoPostPlatforms
+  return (
+    <section className="mt-4 rounded-lg border border-neutral-200 p-4 dark:border-neutral-800" aria-labelledby={`${base}-title`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 id={`${base}-title`} className="text-sm font-semibold">
+          Auto-post
+        </h3>
+        {brand.autoPostEnabled ? <Badge tone="warning">On: posts without asking</Badge> : <Badge>Off: every post waits for your approval</Badge>}
+      </div>
+      <Notice tone="warning" className="mt-3">
+        {AUTO_POST_WARNING}
+      </Notice>
+      <ActionForm action={action} className="mt-3 space-y-4" aria-label={`Auto-post for ${brand.name}`}>
+        <input type="hidden" name="brandId" value={brand.id} />
+        <label htmlFor={`${base}-enabled`} className="flex items-center gap-2 text-sm font-medium">
+          <input id={`${base}-enabled`} type="checkbox" name="enabled" role="switch" defaultChecked={brand.autoPostEnabled} className="h-4 w-4" />
+          Post videos my AI sends automatically for {brand.name}
+        </label>
+        <fieldset>
+          <legend className={label}>Platforms</legend>
+          <p className={hint}>Tick none to allow every connected platform.</p>
+          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {VIDEO_PLATFORMS.map((p) => (
+              <label key={p} className="flex items-center gap-2 text-sm">
+                <input type="checkbox" name="platforms" value={p} defaultChecked={list.includes(p)} className="h-4 w-4" />
+                {PLATFORM_LABELS[p]}
+                {connected.includes(p) ? null : <span className="text-xs text-neutral-500">(not connected)</span>}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label htmlFor={`${base}-max`} className={label}>
+              Most auto-posts per day
+            </label>
+            <input
+              id={`${base}-max`}
+              name="dailyMax"
+              type="number"
+              min={AUTO_POST_DAILY_MAX.min}
+              max={AUTO_POST_DAILY_MAX.max}
+              defaultValue={brand.autoPostDailyMax}
+              className={cx(input, 'mt-1')}
+            />
+            <p className={hint}>Counted over any 24 hours. Above it, videos wait for your approval.</p>
+          </div>
+          <div>
+            <label htmlFor={`${base}-tiktok`} className={label}>
+              Who can see auto-posted TikTok videos
+            </label>
+            <select id={`${base}-tiktok`} name="tiktokPrivacy" defaultValue={brand.autoPostTiktokPrivacy ?? 'PUBLIC_TO_EVERYONE'} className={cx(input, 'mt-1')}>
+              {TIKTOK_PRIVACY_LEVELS.map((l) => (
+                <option key={l} value={l}>
+                  {TIKTOK_PRIVACY_LABELS[l]}
+                </option>
+              ))}
+            </select>
+            <p className={hint}>TikTok asks you to choose this for every post.</p>
+          </div>
+        </div>
+        <p className={hint}>
+          Your AI picks the time: right away, a time you agreed on, or “best” (for example TikTok at {BEST_TIME_SLOTS.tiktok.join(' or ')}, YouTube at{' '}
+          {BEST_TIME_SLOTS.youtube.join(', ')} in this brand&apos;s time zone). Cancel any post in the calendar.
+        </p>
+        <SubmitButton variant="secondary" pendingLabel="Saving…">
+          Save Auto-post
+        </SubmitButton>
+      </ActionForm>
+    </section>
+  )
 }
 
 function ZoneSelect({ id, defaultValue }: { id: string; defaultValue: string }) {
@@ -92,6 +180,8 @@ export function BrandsView({ data, actions }: { data: BrandsData; actions: Brand
                   </div>
                   <StatusPill status={b.status} label={b.status === 'suspended' ? 'Paused (over plan limit)' : undefined} />
                 </div>
+
+                {b.status !== 'archived' ? <AutoPostForm brand={b} connected={data.platformsByBrand[b.id] ?? []} action={actions.autoPost} /> : null}
 
                 {b.status !== 'archived' ? (
                   <details className="mt-4">

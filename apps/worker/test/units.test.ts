@@ -22,7 +22,7 @@ describe('buildRegistry', () => {
     expect(buildRegistry(['posting'], sets).types.sort()).toEqual(['analytics_pull', 'check_post_status', 'cleanup', 'import_past_posts', 'publish_post'])
     const media = buildRegistry(['media'], sets)
     expect(media.types.sort()).toEqual(['clip_render', 'transcribe'])
-    expect(media.missing.sort()).toEqual(['carousel_render', 'source_ingest', 'video_render'])
+    expect(media.missing.sort()).toEqual(['carousel_render', 'code_video_render', 'source_ingest', 'url_import', 'video_render'])
     expect(buildRegistry(['posting', 'media'], sets).types).toHaveLength(7)
   })
 

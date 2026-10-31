@@ -399,6 +399,6 @@ describe('runner integration', () => {
   }, 90_000)
 
   it('exports a handler for every media job type', () => {
-    expect(Object.keys(mediaHandlers).sort()).toEqual(['carousel_render', 'clip_render', 'source_ingest', 'transcribe', 'video_render'])
+    expect(Object.keys(mediaHandlers).sort()).toEqual(['carousel_render', 'clip_render', 'code_video_render', 'source_ingest', 'transcribe', 'url_import', 'video_render'])
   })
 })

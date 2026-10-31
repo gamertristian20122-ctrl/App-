@@ -119,14 +119,45 @@ export interface DownloadResult {
   contentType: string | null
 }
 
-const REQUEST_HEADERS = { accept: '*/*', 'user-agent': 'Mozilla/5.0 (compatible; MediaWorker/1.0)' }
+const REQUEST_HEADERS = { accept: '*/*', 'accept-encoding': 'identity', 'user-agent': 'Mozilla/5.0 (compatible; MediaWorker/1.0)' }
+
+/** User-facing refusals of a download (each is permanent: the job is not retried). */
+export interface DownloadMessages {
+  /** A redirect without a Location header. */
+  notAFile: string
+  tooManyRedirects: string
+  /** A redirect to something that is not a URL. */
+  badRedirect: string
+  /** 4xx (other than 429). */
+  notAvailable: string
+  tooLarge: string
+  empty: string
+}
+
+export interface FileDownloadOptions {
+  fetch: FetchLike
+  signal?: AbortSignal | undefined
+  maxBytes: number
+  timeoutMs: number
+  idleTimeoutMs: number
+  /** Every hop (the first URL and each redirect target): null = allowed, else the refusal message. */
+  checkHop(url: string, hop: number): string | null
+  /** The response's base content type: null = accepted, else the refusal message. */
+  checkContentType(contentType: string | null): string | null
+  /** A fetch error that is a refusal, not a temporary problem (e.g. a non-public address): its message, else null. */
+  refusalFor?(error: unknown): string | null
+  messages: DownloadMessages
+}
 
 /**
- * Downloads `url` to `path`, following at most MAX_REDIRECT_HOPS redirects, each to an allowed
- * download host of `provider`. Throws IngestRefusal (permanent, user message), TransientDownloadError
- * (retry) or JobAbortedError (the job's signal aborted).
+ * Downloads `url` to `path`, following at most MAX_REDIRECT_HOPS redirects, each re-checked with
+ * `checkHop` before it is fetched. The body is streamed to disk under a byte cap with an overall
+ * and an idle timeout while its sha256 is computed. Throws IngestRefusal (permanent, user message),
+ * TransientDownloadError (retry) or JobAbortedError (the job's signal aborted). Shared by drive
+ * links (source_ingest) and URL imports (url_import).
  */
-export async function downloadDriveFile(url: string, path: string, options: DownloadOptions): Promise<DownloadResult> {
+export async function downloadToFile(url: string, path: string, options: FileDownloadOptions): Promise<DownloadResult> {
+  const m = options.messages
   const controller = new AbortController()
   let why: 'job' | 'timeout' | 'idle' | null = null
   const stop = (reason: 'job' | 'timeout' | 'idle') => {
@@ -148,14 +179,16 @@ export async function downloadDriveFile(url: string, path: string, options: Down
     if (why === 'job') return new JobAbortedError()
     if (why === 'timeout' || why === 'idle') return new TransientDownloadError('The download took too long. We will try again.')
     if (error instanceof IngestRefusal || error instanceof TransientDownloadError || error instanceof JobAbortedError) return error
+    const refusal = options.refusalFor?.(error)
+    if (refusal) return new IngestRefusal(refusal)
     return new TransientDownloadError('The file host could not be reached. We will try again.')
   }
 
   try {
     let current = url
     for (let hop = 0; ; hop++) {
-      const allowed = isAllowedDownloadHop(options.provider, current)
-      if (!allowed.ok) throw new IngestRefusal(hop === 0 ? SOURCE_URL_MESSAGES[allowed.reason] : redirectRefusal(allowed.reason))
+      const refusal = options.checkHop(current, hop)
+      if (refusal) throw new IngestRefusal(refusal)
       touch()
       let res: Response
       try {
@@ -166,31 +199,32 @@ export async function downloadDriveFile(url: string, path: string, options: Down
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location')
         await res.body?.cancel().catch(() => undefined)
-        if (!location) throw new IngestRefusal(DRIVE_MESSAGES.notAFile)
-        if (hop >= MAX_REDIRECT_HOPS) throw new IngestRefusal(DRIVE_MESSAGES.tooManyRedirects)
+        if (!location) throw new IngestRefusal(m.notAFile)
+        if (hop >= MAX_REDIRECT_HOPS) throw new IngestRefusal(m.tooManyRedirects)
         try {
           current = new URL(location, current).toString()
         } catch {
-          throw new IngestRefusal(DRIVE_MESSAGES.badRedirect)
+          throw new IngestRefusal(m.badRedirect)
         }
         continue
       }
       if (res.status !== 200) {
         await res.body?.cancel().catch(() => undefined)
         if (res.status === 429 || res.status >= 500) throw new TransientDownloadError('The file host is busy. We will try again.')
-        throw new IngestRefusal(DRIVE_MESSAGES.private)
+        throw new IngestRefusal(m.notAvailable)
       }
       const contentType = (res.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() || null
-      if (contentType === 'text/html' || contentType === 'application/xhtml+xml') {
+      const typeRefusal = options.checkContentType(contentType)
+      if (typeRefusal) {
         await res.body?.cancel().catch(() => undefined)
-        throw new IngestRefusal(DRIVE_MESSAGES.webPage)
+        throw new IngestRefusal(typeRefusal)
       }
       const declared = Number(res.headers.get('content-length') ?? '')
       if (Number.isFinite(declared) && declared > options.maxBytes) {
         await res.body?.cancel().catch(() => undefined)
-        throw new IngestRefusal(DRIVE_MESSAGES.tooLarge)
+        throw new IngestRefusal(m.tooLarge)
       }
-      if (!res.body) throw new IngestRefusal(DRIVE_MESSAGES.empty)
+      if (!res.body) throw new IngestRefusal(m.empty)
 
       const hash = createHash('sha256')
       let bytes = 0
@@ -198,7 +232,7 @@ export async function downloadDriveFile(url: string, path: string, options: Down
         transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback) {
           bytes += chunk.length
           touch()
-          if (bytes > options.maxBytes) return callback(new IngestRefusal(DRIVE_MESSAGES.tooLarge))
+          if (bytes > options.maxBytes) return callback(new IngestRefusal(m.tooLarge))
           hash.update(chunk)
           callback(null, chunk)
         },
@@ -210,7 +244,7 @@ export async function downloadDriveFile(url: string, path: string, options: Down
       } catch (error) {
         throw interrupted(error)
       }
-      if (bytes === 0) throw new IngestRefusal(DRIVE_MESSAGES.empty)
+      if (bytes === 0) throw new IngestRefusal(m.empty)
       return { bytes, sha256: hash.digest('hex'), contentType }
     }
   } finally {
@@ -218,4 +252,28 @@ export async function downloadDriveFile(url: string, path: string, options: Down
     if (idle) clearTimeout(idle)
     options.signal?.removeEventListener('abort', onJobAbort)
   }
+}
+
+/**
+ * Downloads a cloud-drive file: every hop must be one of `provider`'s download hosts (core
+ * isAllowedDownloadHop), and a web page instead of the file is refused.
+ */
+export async function downloadDriveFile(url: string, path: string, options: DownloadOptions): Promise<DownloadResult> {
+  return downloadToFile(url, path, {
+    ...options,
+    checkHop(current, hop) {
+      const allowed = isAllowedDownloadHop(options.provider, current)
+      if (allowed.ok) return null
+      return hop === 0 ? SOURCE_URL_MESSAGES[allowed.reason] : redirectRefusal(allowed.reason)
+    },
+    checkContentType: (type) => (type === 'text/html' || type === 'application/xhtml+xml' ? DRIVE_MESSAGES.webPage : null),
+    messages: {
+      notAFile: DRIVE_MESSAGES.notAFile,
+      tooManyRedirects: DRIVE_MESSAGES.tooManyRedirects,
+      badRedirect: DRIVE_MESSAGES.badRedirect,
+      notAvailable: DRIVE_MESSAGES.private,
+      tooLarge: DRIVE_MESSAGES.tooLarge,
+      empty: DRIVE_MESSAGES.empty,
+    },
+  })
 }

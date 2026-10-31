@@ -23,6 +23,8 @@ export interface PostRow {
   canceledAt: Date | null
   /** Who canceled it: 'web' = the person (withdraws the approval); null = the system. */
   canceledBy: Actor | null
+  /** Who approved what was scheduled (copied from the draft at insert): 'auto_post' = the brand's rule. */
+  approvedVia: Actor | null
   createdAt: Date
   updatedAt: Date
 }

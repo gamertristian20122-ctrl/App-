@@ -17,9 +17,16 @@ import { pageSegments, pickClipsRules, wordTimings, WORD_RANGE_MAX_MS } from '..
 import { excerpt, ok, plural } from '../results'
 import { clipView, jobViewForModel, mediaViewForModel } from '../views'
 import type { McpContext } from '../context'
+import { autoPublishNote } from './publish'
 import { READ_ONLY, type ToolDef } from './types'
 
 const TIMESTAMP = 'Milliseconds (number), or a timestamp string like "01:23.500" or "83.5s".'
+
+const AUTO_PUBLISH =
+  'Optional { platforms?, when?: "now" | "best" | ISO time }: when the render finishes, its draft goes through the brand\'s Auto-post rule (posted automatically only if the user turned Auto-post on in the web app; otherwise it waits for approval).'
+
+/** Tools that can publish through autoPublish touch the outside world. */
+const RENDER_ANNOTATIONS = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const
 
 /** get_transcript without mediaId lists the user's clip sources (so the AI can find the id). */
 const GetTranscriptToolSchema = z
@@ -154,16 +161,19 @@ export const makeClips: ToolDef = {
     brandId: 'The brand the clip drafts are for (default: the video\'s brand, or the only brand).',
     ranges: `The clips: { startMs, endMs, title?, hook? }. ${TIMESTAMP} Pick complete thoughts that hook in the first 3 seconds.`,
     captionStyle: `Caption look: ${CAPTION_STYLES.join(', ')} (default bold).`,
+    autoPublish: `${AUTO_PUBLISH} Applies to each clip's draft.`,
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  annotations: RENDER_ANNOTATIONS,
   async run(ctx, args) {
     const clips = await ctx.services.clips.requestClips(ctx.userId, args, { via: 'mcp' })
     const lines = clips.map((c) => `- ${c.id}: ${range(c.startMs, c.endMs)}${c.title ? ` "${excerpt(c.title, 60)}"` : ''} (${c.status})`)
+    const note = await autoPublishNote(ctx, clips[0]?.brandId, args.autoPublish)
     return ok(
       [
         `Queued ${plural(clips.length, 'clip')} for rendering (9:16, captions: ${clips[0]?.captionStyle ?? 'bold'}):`,
         ...lines,
         'Each clip becomes a draft when it is ready (usually a few minutes). Check with post_status (clipId) or list_drafts, then show it with approve_draft.',
+        ...(note ? [note] : []),
       ].join('\n'),
       { clips: clips.map(clipView) },
     )
@@ -183,13 +193,15 @@ export const renderCarousel: ToolDef = {
     aspect: '4:5 (1080×1350, default), 1:1 or 9:16.',
     theme: 'Colours (hex) and font preset.',
     slides: '1–20 slides: { heading?, body?, footer?, imageMediaId? }.',
+    autoPublish: AUTO_PUBLISH,
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  annotations: RENDER_ANNOTATIONS,
   async run(ctx, args) {
     const job = await ctx.services.renders.requestCarousel(ctx.userId, args, { via: 'mcp' })
     const slides = Array.isArray(args.slides) ? args.slides.length : 0
+    const note = await autoPublishNote(ctx, args.brandId, args.autoPublish)
     return ok(
-      `Rendering a ${plural(slides, 'slide')} carousel (job ${job.id}, ${job.status}). Check with post_status jobId=${job.id}. When it succeeds its result has a draftId (a draft already made with the images): show it with approve_draft instead of creating another draft. Only if draftId is null, attach the media ids to a draft with create_draft.`,
+      `Rendering a ${plural(slides, 'slide')} carousel (job ${job.id}, ${job.status}). Check with post_status jobId=${job.id}. When it succeeds its result has a draftId (a draft already made with the images): show it with approve_draft instead of creating another draft. Only if draftId is null, attach the media ids to a draft with create_draft.${note ? `\n${note}` : ''}`,
       { job: jobViewForModel(job) },
     )
   },
@@ -210,12 +222,14 @@ export const renderVideo: ToolDef = {
     slides: '1–35 slides: { text?, imageMediaId?, durationMs (1000–15000, default 5000) }.',
     audioMediaId: 'Background audio media id (optional).',
     captions: 'Burn the slide text in as captions (default true).',
+    autoPublish: AUTO_PUBLISH,
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  annotations: RENDER_ANNOTATIONS,
   async run(ctx, args) {
     const job = await ctx.services.renders.requestVideo(ctx.userId, args, { via: 'mcp' })
+    const note = await autoPublishNote(ctx, args.brandId, args.autoPublish)
     return ok(
-      `Rendering the video (job ${job.id}, ${job.status}). Check with post_status jobId=${job.id}. When it succeeds its result has a draftId (a draft already made with the video): show it with approve_draft instead of creating another draft. Only if draftId is null, attach the media id to a draft with create_draft.`,
+      `Rendering the video (job ${job.id}, ${job.status}). Check with post_status jobId=${job.id}. When it succeeds its result has a draftId (a draft already made with the video): show it with approve_draft instead of creating another draft. Only if draftId is null, attach the media id to a draft with create_draft.${note ? `\n${note}` : ''}`,
       { job: jobViewForModel(job) },
     )
   },

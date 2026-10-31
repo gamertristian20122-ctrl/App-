@@ -427,6 +427,7 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
 
   function statusPill(p) {
     var d = p.draft;
+    if (d.status === 'approved' && d.approvedRevision === d.revision && d.approvedVia === 'auto_post') return el('span', { class: 'pill ok', text: 'Auto-posted' });
     if (state.done === 'approved' || (d.status === 'approved' && d.approvedRevision === d.revision)) return el('span', { class: 'pill ok', text: 'Approved' });
     if (state.done === 'rejected' || d.status === 'rejected') return el('span', { class: 'pill bad', text: 'Rejected' });
     if (!p.ready) return el('span', { class: 'pill warn', text: 'Needs fixes' });
@@ -482,7 +483,8 @@ a.link, button.link { color: var(--accent); background: none; border: 0; padding
     var approvedNow = p.draft.status === 'approved' && p.draft.approvedRevision === p.draft.revision;
     var buttons = [];
     if (!state.nonce) {
-      buttons.push(el('span', { class: 'meta', text: 'Approve this draft in the web app.' }));
+      var autoPosted = approvedNow && p.draft.approvedVia === 'auto_post';
+      buttons.push(el('span', { class: 'meta', text: autoPosted ? 'Posted automatically: Auto-post is on for this brand. Cancel a post in the web app calendar.' : 'Approve this draft in the web app.' }));
     } else if (state.mode === 'edit') {
       buttons.push(el('button', { class: 'btn', onclick: function () { state.mode = 'view'; state.edit = null; state.error = null; render(); }, disabled: state.busy, text: 'Cancel' }));
       buttons.push(el('button', { class: 'btn primary', onclick: saveEdit, disabled: !canAct, text: state.busy ? 'Saving…' : 'Save changes' }));

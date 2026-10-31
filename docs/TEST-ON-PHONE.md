@@ -90,6 +90,22 @@ you used for Supabase.
 5. Check the website: the draft is in **Approvals** (or approved) and the post is on the
    **Calendar** as scheduled.
 
+## 5b. Try Auto-post (optional)
+
+Auto-post lets your AI post videos without asking you each time. It is **off** until you turn it
+on, and only you can turn it on, on the website (your AI cannot):
+
+1. Open **Brands** and find **Auto-post** under your brand. Read the warning ("When this is on,
+   videos your AI sends are posted without asking you. Platform limits still apply."), tick the
+   switch, choose the platforms (none ticked = every connected one), the most posts per day
+   (default 3) and who can see TikTok videos, then tap **Save Auto-post**.
+2. Videos need storage and the worker, so in this test version an AI can only send a video once
+   the full setup in [DEPLOY.md](DEPLOY.md) is done. With it: ask Claude "Make a 10-second video
+   about our launch and publish it with Clipcast." With Auto-post on it is posted (fake posting
+   here) and the **Calendar** shows it with an **Auto-posted** badge; with it off, the approval
+   card appears as usual.
+3. Turn the switch off again any time; drafts that were not posted yet then wait for you.
+
 ## 6. Connect ChatGPT (optional)
 
 ChatGPT's custom connectors need developer mode, which is set up on chatgpt.com (on a phone, use

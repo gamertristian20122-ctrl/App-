@@ -63,7 +63,7 @@ export function nextFreeSlot(platform: Platform, times: readonly Date[], at: Dat
   return null
 }
 
-function capError(platform: Platform, at: Date, suggested: Date | null): AppError {
+export function capError(platform: Platform, at: Date, suggested: Date | null): AppError {
   const cap = CAPS_PER_24H[platform]
   const label = PLATFORM_LABELS[platform]
   const hint = suggested ? ` The next free time is ${suggested.toISOString()}.` : ' Pick a later time.'
@@ -76,7 +76,7 @@ function capError(platform: Platform, at: Date, suggested: Date | null): AppErro
 }
 
 /** Active post times of an account around `at` (excluding one occurrence of `exclude`). */
-async function capTimesIn(r: BoundRepos, userId: string, accountId: string, at: Date, exclude?: Date): Promise<Date[]> {
+export async function capTimesIn(r: BoundRepos, userId: string, accountId: string, at: Date, exclude?: Date): Promise<Date[]> {
   const range = capQueryRange(at)
   const times = await r.posts.activeTimesInRange(userId, accountId, range.start, addMs(range.end, DAY_MS))
   if (exclude) {
@@ -148,6 +148,11 @@ const ProviderRequestSchema = z.string().trim().min(1).max(200)
 
 const publishJobKey = (postId: string, at: Date) => `publish_post:${postId}:${at.getTime()}`
 
+/** Queues the publish_post job of a post for `at` (in the caller's transaction). */
+export async function enqueuePublishIn(r: BoundRepos, userId: string, postId: string, at: Date, key = publishJobKey(postId, at)) {
+  return enqueueJob(r, { type: 'publish_post', payload: { userId, postId }, runAt: at, idempotencyKey: key })
+}
+
 /** The longest wait between checks of a held post (account on hold, brand paused). */
 export const HELD_MAX_DELAY_MS = 7 * DAY_MS
 
@@ -175,9 +180,7 @@ export async function requeueHeldPostsIn(r: BoundRepos, userId: string, now: Dat
 // ---------------------------------------------------------------------------------------------
 
 export function createPostsService(ctx: Ctx) {
-  async function enqueuePublish(r: BoundRepos, userId: string, postId: string, at: Date, key = publishJobKey(postId, at)) {
-    return enqueueJob(r, { type: 'publish_post', payload: { userId, postId }, runAt: at, idempotencyKey: key })
-  }
+  const enqueuePublish = enqueuePublishIn
 
   async function onPublishedIn(r: BoundRepos, userId: string, post: PostRow): Promise<void> {
     const variant = await r.drafts.getVariant(userId, post.variantId)

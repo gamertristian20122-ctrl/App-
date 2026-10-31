@@ -33,6 +33,7 @@ export { isClipSource, mediaView, type CreateUploadResult, type IngestFacts, typ
 export { MAX_TRANSCRIPT_CHARS, searchSegments, type TranscriptMatch, type TranscriptStatus, type TranscriptView } from './transcripts'
 export type { RenderJobInput, RenderOutput } from './clips'
 export type { DraftPreview, DraftSummary, DraftView, PreviewMedia, PreviewVariant, VariantAccount, VariantView } from './drafts'
+export type { AutoPostDecision, AutoPostResult, PublishVideoResult } from './autopost'
 export { channelsFor, nonceError, type ApprovalVia, type IssuedNonce, type NonceCheck, type NonceProblem } from './approvals'
 export { busiestWindowCount, exceedsCap, nextFreeSlot, type CalendarItem, type PublishPlan, type ResumePlan, type StatusResult } from './posts'
 export { engagementScore, type VoiceProfileView, type VoiceSample } from './voice'

@@ -1,5 +1,6 @@
-import type { BrandStatus } from '@app/core/types'
-import { camelRow, camelRows, many, setClause } from '../sql'
+import type { BrandStatus, Platform } from '@app/core/types'
+import { camelRow, many, setClause } from '../sql'
+import { platformList } from './_mappers'
 import type { Db } from '../types'
 
 export interface BrandRow {
@@ -10,11 +11,26 @@ export interface BrandRow {
   status: BrandStatus
   providerProfileRef: string | null
   archivedAt: Date | null
+  /** Auto-post (0004): the rule may approve drafts an AI or the worker made. Changed only in the web app. */
+  autoPostEnabled: boolean
+  /** Platforms the rule may post to; empty = every connected platform. */
+  autoPostPlatforms: Platform[]
+  /** Drafts the rule may approve per rolling 24 h (1–25, default 3). */
+  autoPostDailyMax: number
+  /** Who can see auto-posted TikTok videos (the person's choice; null = not chosen). */
+  autoPostTiktokPrivacy: string | null
+  autoPostUpdatedAt: Date | null
   createdAt: Date
   updatedAt: Date
 }
 
-const map = (row: Record<string, unknown> | null): BrandRow | null => (row ? camelRow<BrandRow>(row) : null)
+function mapRow(row: Record<string, unknown>): BrandRow {
+  const r = camelRow<BrandRow>(row)
+  return { ...r, autoPostPlatforms: platformList(row.auto_post_platforms) }
+}
+
+const map = (row: Record<string, unknown> | null): BrandRow | null => (row ? mapRow(row) : null)
+const camelRows = (rows: Record<string, unknown>[]): BrandRow[] => rows.map(mapRow)
 
 export interface CreateBrandInput {
   name: string
@@ -63,7 +79,7 @@ export async function list(db: Db, userId: string, options: ListBrandsOptions = 
       order by created_at, id`,
     [userId, statuses],
   )
-  return camelRows<BrandRow>(rows)
+  return camelRows(rows)
 }
 
 export async function countActive(db: Db, userId: string): Promise<number> {
@@ -136,5 +152,30 @@ export async function suspendNewest(db: Db, userId: string, keep: number): Promi
        returning b.*`,
     [userId, Math.max(0, Math.floor(keep))],
   )
-  return camelRows<BrandRow>(rows)
+  return camelRows(rows)
+}
+
+export interface AutoPostPatch {
+  enabled: boolean
+  platforms: readonly Platform[]
+  dailyMax: number
+  tiktokPrivacy: string | null
+  updatedAt: Date
+}
+
+/** Sets the Auto-post switch and its settings (services allow this only from the web app). */
+export async function setAutoPost(db: Db, userId: string, brandId: string, patch: AutoPostPatch): Promise<BrandRow | null> {
+  return map(
+    await db.one(
+      `update public.brands
+          set auto_post_enabled = $3::boolean,
+              auto_post_platforms = $4::text[]::public.platform[],
+              auto_post_daily_max = $5::int,
+              auto_post_tiktok_privacy = $6,
+              auto_post_updated_at = $7::timestamptz
+        where id = $1 and user_id = $2
+        returning *`,
+      [brandId, userId, patch.enabled, [...patch.platforms], patch.dailyMax, patch.tiktokPrivacy, patch.updatedAt],
+    ),
+  )
 }

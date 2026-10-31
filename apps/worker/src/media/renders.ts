@@ -1,24 +1,30 @@
-// Template renders (render_carousel, render_video). Slides are HTML (templates.ts) rendered to JPEG (carousels) / PNG (video frames)
-// with Chromium; template videos turn those cards into an MP4 slideshow with crossfades. Outputs go
-// to users/{u}/renders/{id}.{ext} (ids derived from the job id, so a retried job overwrites instead
-// of duplicating), become media rows through services.renders.recordOutputs, and a DRAFT is created
-// for the brand's connected platforms that accept them (createRenderDraft). The job result is
-// { mediaIds, draftId, platforms }: the user still approves the draft.
+// Template renders (render_carousel, render_video) and code videos (render_code_video). Slides are
+// HTML (templates.ts) rendered to JPEG (carousels) / PNG (video frames) with Chromium; template
+// videos turn those cards into an MP4 slideshow with crossfades; code videos are the AI's HTML
+// animation captured frame by frame (code-video.ts). Outputs go to users/{u}/renders/{id}.{ext}
+// (ids derived from the job id, so a retried job overwrites instead of duplicating), become media
+// rows through services.renders.recordOutputs, and a DRAFT is created for the brand's connected
+// platforms that accept them (createRenderDraft). With autoPublish in the job, the draft then goes
+// through the brand's Auto-post rule (services.autoPost.requestForDraft): posted only when the user
+// turned Auto-post on; otherwise it waits for approval. The job result is
+// { mediaIds, draftId, platforms, autoPost? }.
 
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { uuidV5 } from '@app/core/crypto'
-import { RENDER_SIZES, type RenderCarouselInput, type RenderVideoInput } from '@app/core/validation'
+import type { Platform } from '@app/core/types'
+import { RENDER_SIZES, type AutoPublish, type RenderCarouselInput, type RenderCodeVideoInput, type RenderVideoInput } from '@app/core/validation'
 import type { MediaView } from '@app/services'
 import { renderKey } from '@app/storage'
 import { PermanentJobError, safeErrorMessage, throwIfAborted } from '../errors'
 import { payloadOf } from '../posting/payload'
 import type { Handler, WorkerContext } from '../types'
 import { createRenderDraft, type RenderDraftResult } from './adapters'
+import { CODE_VIDEO_MESSAGES } from './code-video'
 import { fileInput, slideshowPlan, type MediaInput } from './ffmpeg'
 import { fileSize, jpegSize, withTempDir } from './files'
 import { isRetryableMediaError, resolveMediaOptions, type MediaHandlerOptions, type ResolvedMediaOptions } from './options'
-import { runTool } from './process'
+import { MediaToolError, runTool } from './process'
 import { probe } from './probe'
 import type { SlidePage } from './renderer'
 import { carouselSlideHtml, resolveTheme, videoSlideHtml, type InlineImage } from './templates'
@@ -33,6 +39,14 @@ export const RENDER_MESSAGES = {
 const MAX_INLINE_IMAGE_BYTES = 25_000_000
 const INLINE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
+/** What the Auto-post rule decided for the job's draft (autoPublish jobs only). */
+export interface AutoPostOutcome {
+  outcome: string
+  autoPosted: boolean
+  message: string
+  postIds: string[]
+}
+
 export interface RenderOutcome {
   mediaIds: string[]
   draftId: string | null
@@ -41,6 +55,26 @@ export interface RenderOutcome {
   /** Why the draft was refused (safe message), when draftReason is draft_refused. */
   draftMessage?: string
   durationMs?: number
+  autoPost?: AutoPostOutcome
+}
+
+/**
+ * Applies the brand's Auto-post rule to the draft a job made (autoPublish). Idempotent in services
+ * (a retried job gets the same decision). Refusals are part of the result, never a job failure;
+ * only temporary errors are rethrown (the job retries and reuses its draft).
+ */
+export async function applyAutoPublish(ctx: WorkerContext, userId: string, draftId: string | null, autoPublish: AutoPublish | undefined): Promise<AutoPostOutcome | undefined> {
+  if (!autoPublish) return undefined
+  if (!draftId) return { outcome: 'no_draft', autoPosted: false, message: 'No draft was made (no connected account takes this media), so nothing was posted.', postIds: [] }
+  try {
+    const r = await ctx.services.autoPost.requestForDraft(userId, draftId, autoPublish, { via: 'worker' })
+    ctx.logger.info('auto-post decided', { draftId, outcome: r.outcome })
+    return { outcome: r.outcome, autoPosted: r.autoPosted, message: r.message, postIds: r.posts.map((p) => p.id) }
+  } catch (error) {
+    if (isRetryableMediaError(error)) throw error
+    ctx.logger.warn('auto-post refused', { draftId, error: safeErrorMessage(error) })
+    return { outcome: 'error', autoPosted: false, message: safeErrorMessage(error), postIds: [] }
+  }
 }
 
 /** Loads one of the user's ready images as a data-URI payload (inside the job's temp dir). */
@@ -70,16 +104,26 @@ function summary(text: string, max: number): string {
   return [...lines.join('\n')].slice(0, max).join('').trim()
 }
 
-async function draftFor(ctx: WorkerContext, userId: string, brandId: string, media: MediaView[], kind: 'photos' | 'video', firstText: string, label: string): Promise<RenderDraftResult> {
-  const text = summary(firstText, 300)
+async function draftFor(
+  ctx: WorkerContext,
+  userId: string,
+  brandId: string,
+  media: MediaView[],
+  kind: 'photos' | 'video',
+  firstText: string,
+  label: string,
+  options: { text?: string; title?: string; platforms?: readonly Platform[] | undefined } = {},
+): Promise<RenderDraftResult> {
+  const text = options.text ?? summary(firstText, 300)
   try {
     return await createRenderDraft(ctx, userId, {
       brandId,
       media,
       kind,
       text,
-      title: summary(firstText.split('\n')[0] ?? '', 100) || label,
-      notes: text ? `${label}: ${text.replace(/\s+/g, ' ')}` : label,
+      title: options.title ?? (summary(firstText.split('\n')[0] ?? '', 100) || label),
+      notes: text ? `${label}: ${summary(text, 300).replace(/\s+/g, ' ')}` : label,
+      platforms: options.platforms,
     })
   } catch (error) {
     // the media are recorded; a refused draft (brand archived, account on hold...) must not lose them
@@ -124,7 +168,8 @@ export function createCarouselRender(options: MediaHandlerOptions = {}): Handler
       const media = await ctx.services.renders.recordOutputs(userId, { brandId, outputs })
       const first = carousel.slides[0]
       const firstText = [first?.heading, first?.body].filter(Boolean).join('\n')
-      const draft = await draftFor(ctx, userId, brandId, media, 'photos', firstText, 'Carousel')
+      const draft = await draftFor(ctx, userId, brandId, media, 'photos', firstText, 'Carousel', { platforms: carousel.autoPublish?.platforms })
+      const autoPost = await applyAutoPublish(ctx, userId, draft.draftId, carousel.autoPublish)
       ctx.logger.info('carousel rendered', { slides: total, draftId: draft.draftId, platforms: draft.platforms })
       return {
         mediaIds: media.map((m) => m.id),
@@ -132,6 +177,7 @@ export function createCarouselRender(options: MediaHandlerOptions = {}): Handler
         platforms: draft.platforms,
         ...(draft.reason ? { draftReason: draft.reason } : {}),
         ...(draft.message ? { draftMessage: draft.message } : {}),
+        ...(autoPost ? { autoPost } : {}),
       }
     })
   }
@@ -199,7 +245,8 @@ export function createVideoRender(options: MediaHandlerOptions = {}): Handler {
         outputs: [{ storageKey, kind: 'video', mimeType: 'video/mp4', bytes: await fileSize(outPath), width: size.width, height: size.height, durationMs }],
       })
       const firstText = video.slides.find((s) => s.text)?.text ?? ''
-      const draft = await draftFor(ctx, userId, brandId, media, 'video', firstText, 'Video')
+      const draft = await draftFor(ctx, userId, brandId, media, 'video', firstText, 'Video', { platforms: video.autoPublish?.platforms })
+      const autoPost = await applyAutoPublish(ctx, userId, draft.draftId, video.autoPublish)
       ctx.logger.info('template video rendered', { slides: video.slides.length, durationMs, draftId: draft.draftId, platforms: draft.platforms })
       return {
         mediaIds: media.map((m) => m.id),
@@ -208,6 +255,93 @@ export function createVideoRender(options: MediaHandlerOptions = {}): Handler {
         durationMs,
         ...(draft.reason ? { draftReason: draft.reason } : {}),
         ...(draft.message ? { draftMessage: draft.message } : {}),
+        ...(autoPost ? { autoPost } : {}),
+      }
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// code_video_render
+// ---------------------------------------------------------------------------------------------
+
+export interface CodeVideoOutcome extends RenderOutcome {
+  frames: number
+  usedSeek: boolean
+  /** Network / file requests the page tried; all were blocked. */
+  blockedRequests: number
+}
+
+export function createCodeVideoRender(options: MediaHandlerOptions = {}): Handler {
+  const o = resolveMediaOptions(options)
+  return async (job, ctx): Promise<CodeVideoOutcome> => {
+    const { userId, brandId, input } = payloadOf('code_video_render', job)
+    const spec: RenderCodeVideoInput = input
+    const size = RENDER_SIZES[spec.aspect] ?? { width: 1080, height: 1920 }
+    return withTempDir(ctx.tmpDir, 'code-video', async (dir) => {
+      const audio = spec.audioMediaId ? await loadAudio(ctx, o, userId, spec.audioMediaId, dir) : null
+      let rendered
+      try {
+        rendered = await o.codeVideo({
+          html: spec.html,
+          width: size.width,
+          height: size.height,
+          fps: spec.fps,
+          durationMs: spec.durationMs,
+          audio,
+          output: 'video.mp4',
+          cwd: dir,
+          ffmpegPath: ctx.config.FFMPEG_PATH,
+          executablePath: ctx.config.CHROMIUM_PATH ?? null,
+          signal: ctx.signal,
+          timeouts: o.codeVideoTimeouts,
+        })
+      } catch (error) {
+        // ffmpeg refusing the frames is the page's fault, not something a retry fixes
+        if (error instanceof MediaToolError && error.reason === 'exit') throw new PermanentJobError(CODE_VIDEO_MESSAGES.badOutput)
+        throw error
+      }
+      throwIfAborted(ctx.signal)
+
+      const outPath = join(dir, 'video.mp4')
+      const out = await probe(outPath, { ffprobePath: ctx.config.FFPROBE_PATH, signal: ctx.signal, timeoutMs: o.timeouts.probeMs })
+      const durationMs = out.durationMs ?? 0
+      const expectedMs = (rendered.frames / spec.fps) * 1000
+      if (!out.video || out.video.width !== size.width || out.video.height !== size.height || !out.audio || Math.abs(durationMs - expectedMs) > 1000 / spec.fps + 100) {
+        throw new PermanentJobError(RENDER_MESSAGES.badOutput)
+      }
+      const storageKey = renderKey(userId, outputId(job.id, 'code-video'), 'mp4')
+      await ctx.storage.putFile(storageKey, outPath, 'video/mp4')
+      const media = await ctx.services.renders.recordOutputs(userId, {
+        brandId,
+        outputs: [{ storageKey, kind: 'video', mimeType: 'video/mp4', bytes: await fileSize(outPath), width: size.width, height: size.height, durationMs }],
+      })
+      const caption = spec.caption ?? ''
+      const draft = await draftFor(ctx, userId, brandId, media, 'video', caption, 'Code video', {
+        text: caption,
+        title: spec.title ?? (summary(caption.split('\n')[0] ?? '', 100) || 'New video'),
+        platforms: spec.autoPublish?.platforms,
+      })
+      const autoPost = await applyAutoPublish(ctx, userId, draft.draftId, spec.autoPublish)
+      ctx.logger.info('code video rendered', {
+        frames: rendered.frames,
+        durationMs,
+        usedSeek: rendered.usedSeek,
+        blockedRequests: rendered.blockedRequests,
+        pageErrors: rendered.pageErrors,
+        draftId: draft.draftId,
+      })
+      return {
+        mediaIds: media.map((m) => m.id),
+        draftId: draft.draftId,
+        platforms: draft.platforms,
+        durationMs,
+        frames: rendered.frames,
+        usedSeek: rendered.usedSeek,
+        blockedRequests: rendered.blockedRequests,
+        ...(draft.reason ? { draftReason: draft.reason } : {}),
+        ...(draft.message ? { draftMessage: draft.message } : {}),
+        ...(autoPost ? { autoPost } : {}),
       }
     })
   }

@@ -52,6 +52,9 @@ describe('tools/list', () => {
       'render_carousel',
       'render_video',
       'get_analytics',
+      'upload_media',
+      'render_code_video',
+      'publish_video',
       'approval_decide',
       'approval_edit_variant',
     ])

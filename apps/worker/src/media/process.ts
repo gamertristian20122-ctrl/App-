@@ -135,3 +135,88 @@ export function runTool(command: string, args: readonly string[], options: RunTo
 
 /** Global ffmpeg flags: quiet, never interactive, overwrite outputs. */
 export const FFMPEG_BASE_ARGS = ['-hide_banner', '-nostdin', '-nostats', '-loglevel', 'error', '-y'] as const
+
+/** A running media tool that reads its input from stdin (frames piped into ffmpeg). */
+export interface StreamingTool {
+  /** Writes one chunk, waiting while the pipe is full. Rejects once the tool has stopped. */
+  write(chunk: Uint8Array): Promise<void>
+  /** Closes stdin and resolves when the tool exits 0 (rejects like runTool otherwise). */
+  finish(): Promise<RunToolResult>
+  /** Kills the tool (no-op once it exited). */
+  kill(): void
+}
+
+/**
+ * Like runTool, but with stdin open for streaming input (`-i pipe:0`). Same guarantees: argument
+ * array, no shell, minimal environment, killed on abort or timeout, bounded stderr tail.
+ */
+export function startTool(command: string, args: readonly string[], options: RunToolOptions): StreamingTool {
+  const tool = toolName(command)
+  const { signal } = options
+  let killedFor: 'abort' | 'timeout' | null = null
+  let stderrTail = ''
+  let exit: { error: Error | null } | null = null
+  const child = spawn(command, [...args], { cwd: options.cwd, env: toolEnv(), shell: false, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] })
+  const kill = (why: 'abort' | 'timeout') => {
+    if (killedFor || exit) return
+    killedFor = why
+    child.kill('SIGKILL')
+  }
+  const onAbort = () => kill('abort')
+  const timer = setTimeout(() => kill('timeout'), Math.max(1, options.timeoutMs))
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) kill('abort')
+
+  const done = new Promise<RunToolResult>((resolve, reject) => {
+    const settle = (error: Error | null) => {
+      if (exit) return
+      exit = { error }
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve({ stdout: '', stderrTail })
+    }
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES)
+    })
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      settle(new MediaToolError(error.code === 'ENOENT' ? `${tool} is not installed on this worker.` : `${tool} could not be started.`, 'spawn', tool, null, ''))
+    })
+    child.on('close', (code) => {
+      if (killedFor === 'abort') return settle(new JobAbortedError())
+      if (killedFor === 'timeout') return settle(new MediaToolError(`${tool} took too long.`, 'timeout', tool, code, stderrTail))
+      if (code !== 0) return settle(new MediaToolError(`${tool} failed (exit code ${code ?? 'signal'}).`, 'exit', tool, code, stderrTail))
+      settle(null)
+    })
+  })
+  // a broken pipe surfaces through `done` (the exit code); swallow the stream error itself
+  child.stdin?.on('error', () => undefined)
+  done.catch(() => undefined)
+
+  return {
+    async write(chunk) {
+      if (exit || !child.stdin || child.stdin.destroyed) {
+        await done
+        throw new MediaToolError(`${tool} stopped reading its input.`, 'exit', tool, null, stderrTail)
+      }
+      if (child.stdin.write(chunk)) return
+      await new Promise<void>((resolve) => {
+        const stdin = child.stdin
+        const finish = () => {
+          stdin?.off('drain', finish)
+          stdin?.off('close', finish)
+          resolve()
+        }
+        stdin?.once('drain', finish)
+        stdin?.once('close', finish)
+      })
+    },
+    async finish() {
+      child.stdin?.end()
+      return done
+    },
+    kill() {
+      kill('abort')
+    },
+  }
+}

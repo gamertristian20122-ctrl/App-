@@ -80,7 +80,7 @@ describe('BrandsView', () => {
   it('shows the limit and disables creation at the limit', async () => {
     const t = await h.tenant({ plan: 'starter', platforms: ['x'] })
     const data = await loadBrands(h.services, t.userId)
-    const html = decode(renderToStaticMarkup(<BrandsView data={data} actions={{ create: noop, update: noop, archive: noop, restore: noop }} />))
+    const html = decode(renderToStaticMarkup(<BrandsView data={data} actions={{ create: noop, update: noop, archive: noop, restore: noop, autoPost: noop }} />))
     expect(html).toContain('1 of 1')
     expect(html).toContain('You are using all 1 brand on your plan')
     expect(html).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Create brand<\/button>/)

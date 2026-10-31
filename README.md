@@ -38,19 +38,26 @@ Everything in the v1 plan (`CLAUDE.md`, build order steps 1–8) is written and 
 - **Database:** 20 tables in Supabase Postgres (`supabase/migrations`), row-level security on every
   table, approval rules enforced by the database itself.
 - **MCP server** at `/api/mcp` (Streamable HTTP, OAuth 2.1 with dynamic client registration):
-  14 tools (`connect_account`, `list_accounts`, `create_draft`, `list_drafts`, `approve_draft`,
+  17 tools (`connect_account`, `list_accounts`, `create_draft`, `list_drafts`, `approve_draft`,
   `schedule_post`, `post_status`, `get_transcript`, `make_clips`, `import_past_posts`,
-  `save_voice_profile`, `render_carousel`, `render_video`, `get_analytics`), 3 prompts
-  (`write_post`, `pick_clips`, `weekly_review`) and the approval card (an MCP App with Approve /
-  Edit / Reject that also works in ChatGPT). The AI can never approve on its own.
+  `save_voice_profile`, `render_carousel`, `render_video`, `get_analytics`, `upload_media`,
+  `render_code_video`, `publish_video`), 3 prompts (`write_post`, `pick_clips`, `weekly_review`)
+  and the approval card (an MCP App with Approve / Edit / Reject that also works in ChatGPT). The AI
+  can never approve on its own.
+- **Auto-post** ([docs/plans/02-auto-post.md](docs/plans/02-auto-post.md)): an AI that finishes a
+  video sends it (`upload_media` + its `curl` command, a link, or an HTML animation for
+  `render_code_video`) and calls `publish_video`. If the person turned on the brand's Auto-post
+  switch on the Brands page, the brand's rule approves and schedules it (platform list, daily
+  limit, platform rules and caps still apply); otherwise it waits for approval as always. Only the
+  person can turn it on, in the web app.
 - **Web app** (Next.js): landing page with pricing, magic-link sign-in, dashboard (overview,
   approvals, calendar, brands, accounts, media, clips, voice, analytics, billing, connect your AI),
   OAuth consent page, one-click web approval, Stripe Checkout and customer portal, webhooks,
   daily crons.
 - **Worker** (Railway): publishing, status checks, analytics, imports, clean-up, and the media
-  jobs (ingest, transcription, clip rendering with ffmpeg, carousel and template-video rendering
-  with Chromium).
-- **Tests:** 1,255 unit and integration tests, a real-Postgres suite, and an end-to-end run
+  jobs (ingest, URL imports, transcription, clip rendering with ffmpeg, carousel, template-video
+  and HTML code-video rendering with Chromium).
+- **Tests:** 1,334 unit and integration tests, a real-Postgres suite, and an end-to-end run
   (`pnpm e2e`) that drives the whole product with a real MCP client and a real browser.
 
 **Not done yet:** nothing has run against the live services (Supabase, Stripe, Upload-Post,

@@ -143,7 +143,7 @@ export const listDrafts: ToolDef = {
 }
 
 /** UI-only payload for the approval card: the nonce and the preview with media URLs. */
-function cardMeta(preview: DraftPreview, nonce: IssuedNonce, webUrl: string): Record<string, unknown> {
+export function cardMeta(preview: DraftPreview, nonce: IssuedNonce, webUrl: string): Record<string, unknown> {
   return {
     [APPROVAL_META_KEY]: {
       nonce: nonce.nonce,
@@ -156,7 +156,7 @@ function cardMeta(preview: DraftPreview, nonce: IssuedNonce, webUrl: string): Re
 }
 
 /** What the model sees of a preview: no media URLs (they are short-lived capability links). */
-function modelPreview(preview: DraftPreview) {
+export function modelPreview(preview: DraftPreview) {
   const view = previewView(preview)
   return {
     ...view,
@@ -164,7 +164,7 @@ function modelPreview(preview: DraftPreview) {
   }
 }
 
-function previewLines(preview: DraftPreview): string[] {
+export function previewLines(preview: DraftPreview): string[] {
   return preview.variants.map((v) => {
     const media = v.media.length > 0 ? `, ${plural(v.media.length, 'media item')}` : ''
     const blocking = v.issues.filter((i) => i.severity === 'error').map((i) => i.message)
@@ -209,7 +209,7 @@ export const approveDraft: ToolDef = {
 
 // ---------------------------------------------------------------------------------------------
 
-function postLine(p: PostRow): string {
+export function postLine(p: PostRow): string {
   const label = PLATFORM_LABELS[p.platform]
   const when = p.status === 'published' && p.publishedAt ? `published ${p.publishedAt.toISOString()}` : `${p.status}, scheduled for ${p.scheduledFor.toISOString()}`
   const url = p.postUrl ? ` ${p.postUrl}` : ''
@@ -270,25 +270,41 @@ export const postStatus: ToolDef = {
       const job = await services.jobs.get(userId, args.jobId)
       const result = job.status === 'succeeded' && job.result ? ` Result: ${JSON.stringify(job.result)}` : ''
       const error = job.error ? ` Error: ${job.error}` : ''
-      const produced = job.status === 'succeeded' && job.result && typeof job.result === 'object' ? (job.result as { draftId?: unknown }) : null
+      const produced = job.status === 'succeeded' && job.result && typeof job.result === 'object' ? (job.result as { draftId?: unknown; autoPost?: { outcome?: unknown; message?: unknown } }) : null
+      const auto = produced?.autoPost && typeof produced.autoPost.message === 'string' ? produced.autoPost : null
       const next =
         produced && 'draftId' in produced
           ? typeof produced.draftId === 'string'
-            ? ` Its draft is ${produced.draftId}: show it with approve_draft (do not create another draft for these media).`
+            ? auto?.outcome === 'posted'
+              ? ` Its draft ${produced.draftId} was posted automatically (Auto-post): ${String(auto.message)} Follow it with post_status draftId=${produced.draftId}.`
+              : ` Its draft is ${produced.draftId}: show it with approve_draft (do not create another draft for these media).${auto ? ` Auto-post: ${String(auto.message)}` : ''}`
             : ' No draft was made (no connected account takes this media): attach the media ids to a draft with create_draft once an account is connected.'
           : ''
       return ok(`Job ${job.id} (${job.type}): ${job.status}.${result}${next}${error}`, { job: jobViewForModel(job) })
     }
     if (typeof args.clipId === 'string') {
       const clip = await services.clips.get(userId, args.clipId)
-      const next = clip.draftId ? ` Its draft is ${clip.draftId}: show it with approve_draft.` : ''
+      const auto = clip.draftId ? await services.autoPost.status(userId, clip.draftId) : null
+      const next = !clip.draftId
+        ? ''
+        : auto?.autoPosted
+          ? ` Its draft ${clip.draftId} was posted automatically (Auto-post): follow it with post_status draftId=${clip.draftId}.`
+          : ` Its draft is ${clip.draftId}: show it with approve_draft.${auto ? ` Auto-post: ${auto.message}` : ''}`
       const error = clip.error ? ` Error: ${clip.error}` : ''
       return ok(`Clip ${clip.id}: ${clip.status}.${next}${error}`, { clip: clipView(clip) })
     }
     const input = PostStatusInputSchema.parse(args)
     const posts = await services.posts.status(userId, input.postId ? { postId: args.postId } : { draftId: args.draftId })
-    if (posts.length === 0) return ok('This draft has no scheduled or published posts yet. Schedule it with schedule_post once it is approved.', { posts: [] })
-    return ok(posts.map(postLine).join('\n'), { posts: posts.map(postView) })
+    const auto = typeof args.draftId === 'string' ? await services.autoPost.status(userId, args.draftId) : null
+    if (posts.length === 0) {
+      const why = auto ? ` Auto-post: ${auto.message}` : ''
+      return ok(`This draft has no scheduled or published posts yet. Schedule it with schedule_post once it is approved.${why}`, {
+        posts: [],
+        ...(auto ? { autoPost: { outcome: auto.outcome, message: auto.message } } : {}),
+      })
+    }
+    const lines = posts.map((p) => `${postLine(p)}${p.approvedVia === 'auto_post' ? ' [auto-posted]' : ''}`)
+    return ok(lines.join('\n'), { posts: posts.map(postView), ...(auto ? { autoPost: { outcome: auto.outcome, message: auto.message } } : {}) })
   },
 }
 

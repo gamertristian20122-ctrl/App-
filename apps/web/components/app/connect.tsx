@@ -8,6 +8,11 @@ import { Card, EmptyState, PageHeader } from '@/components/ui/primitives'
 import { PRODUCT_NAME, PRODUCT_SLUG } from '@/lib/ui/brand'
 import { formatDateTime } from '@/lib/ui/format'
 
+/** The Claude Code command that adds this server (remote MCP over Streamable HTTP). */
+export function claudeCodeCommand(mcpUrl: string): string {
+  return `claude mcp add --transport http ${PRODUCT_SLUG} ${mcpUrl}`
+}
+
 /** The Cursor mcp.json snippet for this server. */
 export function cursorConfig(mcpUrl: string): string {
   return JSON.stringify({ mcpServers: { [PRODUCT_SLUG]: { url: mcpUrl } } }, null, 2)
@@ -25,6 +30,7 @@ function Steps({ items }: { items: ReactNode[] }) {
 
 const PROMPTS = [
   'Draft a LinkedIn and X post about our launch, in my voice.',
+  'Make a 15-second vertical teaser video for our launch and publish it with publish_video.',
   'Pick the 5 best clips from my latest video and draft posts for TikTok and YouTube Shorts.',
   'Schedule my approved drafts for tomorrow at 9am.',
   'Run my weekly review and suggest three experiments.',
@@ -85,6 +91,30 @@ export function ConnectView({ mcpUrl, connections, revoke, timezone }: { mcpUrl:
               <CopyButton value={snippet} label="Copy JSON" className="shrink-0 whitespace-nowrap" />
               <span className="text-xs text-neutral-500">Then sign in from Cursor Settings → MCP.</span>
             </div>
+          </Card>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Card title="Claude Code" description="Coding assistants with a terminal (Claude Code, Codex, Cursor's agent).">
+            <p className="text-sm text-neutral-700 dark:text-neutral-300">Run this once in a terminal, then sign in here when Claude Code asks:</p>
+            <pre className="mt-2 overflow-x-auto rounded-lg bg-neutral-950 p-3 font-mono text-xs text-neutral-100" data-testid="claude-code-command">
+              {claudeCodeCommand(mcpUrl)}
+            </pre>
+            <div className="mt-2">
+              <CopyButton value={claudeCodeCommand(mcpUrl)} label="Copy command" className="shrink-0 whitespace-nowrap" />
+            </div>
+          </Card>
+          <Card title="Videos your AI makes" description="The auto pipeline.">
+            <p className="text-sm text-neutral-700 dark:text-neutral-300" data-testid="auto-pipeline">
+              When your AI finishes a video, it sends it here: a coding assistant uploads the file with <code className="font-mono text-xs">upload_media</code>, a chat
+              assistant can write the animation as HTML for <code className="font-mono text-xs">render_code_video</code>, and{' '}
+              <code className="font-mono text-xs">publish_video</code> saves it as a draft for your connected platforms. If you turned on{' '}
+              <a href="/app/brands" className="font-medium text-indigo-700 underline dark:text-indigo-300">
+                Auto-post
+              </a>{' '}
+              for the brand, it is posted automatically (within your platform list and daily limit; platform limits still apply). Otherwise it waits in your
+              approvals, as always. Only you can turn Auto-post on, here on the website.
+            </p>
           </Card>
         </div>
 

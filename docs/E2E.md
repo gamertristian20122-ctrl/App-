@@ -48,9 +48,11 @@ The script uses packages the workspace already has (no new dependencies):
    consent page (signed in) and clicks Allow; the code lands on a loopback callback server; the SDK
    exchanges it. Refresh: the access token is replaced with garbage, the next request gets a 401
    and the SDK refreshes (the refresh token rotates).
-4. **Tools.** `tools/list`: all 14 v1 tools plus the 2 app-only ones, each with a title and a
-   `readOnlyHint` or `destructiveHint`; `approve_draft` points at `ui://approval-card/v1`; the
-   app-only tools have `visibility: ["app"]`; prompts and the card resource are listed.
+4. **Tools.** `tools/list`: all 17 tools (the 14 v1 tools plus `upload_media`,
+   `render_code_video` and `publish_video`) and the 2 app-only ones, each with a title and a
+   `readOnlyHint` or `destructiveHint`; `approve_draft` and `publish_video` point at
+   `ui://approval-card/v1` (`publish_video` is destructive); the app-only tools have
+   `visibility: ["app"]`; prompts and the card resource are listed.
 5. **Accounts.** `connect_account` for X, LinkedIn, Instagram, TikTok (fake provider); the X link
    is opened in the browser and the Accounts page syncs it; `list_accounts` shows all four active.
 6. **Draft → approval → publish.** An X variant with a link is refused with "X: Links are not
@@ -60,37 +62,48 @@ The script uses packages the workspace already has (no new dependencies):
    (`text/html;profile=mcp-app`); a guessed nonce is refused, the card nonce approves once via
    `approval_decide`; `schedule_post` 60 s ahead; the worker publishes through the fake provider
    and `post_status` shows both posts published with URLs, not before their time.
-7. **Clips.** ffmpeg makes a 20 s test video (testsrc + sine). `/api/uploads` without the rights
+7. **Auto-post** (docs/plans/02-auto-post.md). The person turns on Auto-post on the Brands page in
+   Chromium (the warning is shown; switch on, TikTok + Instagram, daily limit 3, TikTok privacy
+   "Everyone", Save): the brand row changes and the audit entry's actor is `web`; `list_accounts`
+   shows the switch read-only. Then the AI side: ffmpeg makes a 6 s video, `upload_media` returns a
+   presigned PUT and a `curl` command, which the script runs with `sh -c` (no proxy variables), and
+   `publish_video` (TikTok + Instagram, `when: "now"`) answers that the video is still processing.
+   The worker ingests it and the rule approves the draft (`approved_via = 'auto_post'`) and
+   schedules both posts for the next minute; a later check (after the text post is published)
+   waits until `post_status` shows both published by the fake provider with URLs and
+   `approvedVia: "auto_post"`, the draft's outcome is `posted`, and the calendar shows the
+   "Auto-posted" badge.
+8. **Clips.** ffmpeg makes a 20 s test video (testsrc + sine). `/api/uploads` without the rights
    checkbox is refused; with it: presign → PUT → complete → ingest (probe, promoted out of
    `uploads/`) → transcription (`get_transcript`, nothing past the end of the video, `pick_clips`
    prompt) → `make_clips` with two ranges (ms and `"00:09.000"`) → `clip_render` → each clip is
    1080x1920 with an audio stream (ffprobe on the file downloaded through the card's preview URL)
    and became a **draft**, not a post. The usage ledger has exactly 20 settled clip seconds, and
    the overview shows "1 min of 1 h".
-8. **Carousel.** `render_carousel` → 3 slides, 1080x1350 `image/jpeg` (JPEG magic bytes checked) →
+9. **Carousel.** `render_carousel` → 3 slides, 1080x1350 `image/jpeg` (JPEG magic bytes checked) →
    a draft (no posts).
-9. **Voice and analytics.** `save_voice_profile`, `write_post` (loads the profile),
+10. **Voice and analytics.** `save_voice_profile`, `write_post` (loads the profile),
    `import_past_posts` (rows appear), `get_analytics`, `weekly_review`.
-10. **Drive links.** A YouTube link on the Media page is refused in the browser (button disabled,
+11. **Drive links.** A YouTube link on the Media page is refused in the browser (button disabled,
     message shown) and by the server (the form forced through; no media row created).
-11. **Approval card in an MCP Apps host.** `scripts/e2e/card-harness.html` is a host page: it
+12. **Approval card in an MCP Apps host.** `scripts/e2e/card-harness.html` is a host page: it
     loads the card from `resources/read` in a sandboxed iframe, answers `ui/initialize`, sends
     `tool-input` and the real `approve_draft` result, resizes on `size-changed`, records
     `ui/update-model-context`, and forwards the card's `tools/call` to the real server. The card
     asks who can see the TikTok post (`approval_edit_variant`), then Approve calls
     `approval_decide`; the draft is approved via `mcp`.
-12. **One-click web approval.** `/approve/<card nonce>` for a clip draft: Approve is disabled until
+13. **One-click web approval.** `/approve/<card nonce>` for a clip draft: Approve is disabled until
     the TikTok privacy is saved (which moves to a fresh nonce), then Approve → approved via `web`.
-13. **Screenshots** (1440x900, plus a 390x844 landing page) with a health check on each page:
+14. **Screenshots** (1440x900, plus a 390x844 landing page) with a health check on each page:
     status < 400, our stylesheet loaded, no error screen, no browser errors.
-14. **Security.** `/api/mcp` without a token → 401 with
+15. **Security.** `/api/mcp` without a token → 401 with
     `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp"`
     (followed: `resource` and `authorization_servers` match); AS metadata has S256 and a
     registration endpoint; the consent and approval pages carry `X-Frame-Options: DENY`,
     `frame-ancestors 'none'` and `no-referrer` while `/api/mcp` is untouched; a made-up token →
     `invalid_token`; reusing a rotated refresh token → `invalid_grant` and the whole token family
     is revoked (the current access token stops working).
-15. The worker reports no dead jobs and the web log has no errors.
+16. The worker reports no dead jobs and the web log has no errors.
 
 ## Screenshots (`docs/screenshots`, about 1.9 MB)
 
@@ -147,5 +160,7 @@ strips `TSX_*` from the environment it passes on.
 ## Not covered here
 
 Live Supabase Auth, Stripe, Upload-Post, R2, Whisper/AssemblyAI and real Claude/ChatGPT/Cursor
-clients (all replaced by fakes or stubs); `render_video` (covered by the worker's ffmpeg tests);
+clients (all replaced by fakes or stubs); `render_video` and `render_code_video` (covered by the
+worker's ffmpeg / Chromium tests, including a page whose `fetch` is blocked); `upload_media` with a
+`sourceUrl` (the download is covered with a mocked HTTP client: the run has no network);
 ChatGPT's `window.openai` card path (covered in `node:vm` by `card.test.ts`); the Docker image.

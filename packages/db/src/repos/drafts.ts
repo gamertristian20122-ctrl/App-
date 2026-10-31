@@ -1,3 +1,4 @@
+import type { AutoPostOutcome } from '@app/core/autopost'
 import type { Actor, DraftStatus, Platform } from '@app/core/types'
 import { camelRow, camelRows, clampLimit, json, many, setClause } from '../sql'
 import type { Db } from '../types'
@@ -19,6 +20,13 @@ export interface DraftRow {
   approvedVia: Actor | null
   rejectedReason: string | null
   notes: string | null
+  /** Auto-post (0004): 'now' | 'best' | ISO time, set when an AI or the worker asked to auto-post it. */
+  autoPostWhen: string | null
+  autoPostRequestedAt: Date | null
+  /** When the rule decided (it decides once); null while it waits for the video to process. */
+  autoPostDecidedAt: Date | null
+  autoPostOutcome: AutoPostOutcome | null
+  autoPostNote: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -306,4 +314,58 @@ export async function moveToBrand(db: Db, userId: string, draftId: string, brand
 export async function remove(db: Db, userId: string, draftId: string): Promise<boolean> {
   const rows = await db.query('delete from public.drafts where id = $1 and user_id = $2 returning id', [draftId, userId])
   return rows.length > 0
+}
+
+// ---------------------------------------------------------------------------------------------
+// Auto-post (0004)
+// ---------------------------------------------------------------------------------------------
+
+/** Records that an AI or the worker asked for the draft to be auto-posted (first request wins). */
+export async function requestAutoPost(db: Db, userId: string, draftId: string, input: { when: string; at: Date }): Promise<DraftRow | null> {
+  await db.query(
+    `update public.drafts set auto_post_when = $3, auto_post_requested_at = $4::timestamptz
+      where id = $1 and user_id = $2 and auto_post_requested_at is null`,
+    [draftId, userId, input.when, input.at],
+  )
+  return get(db, userId, draftId)
+}
+
+/** Stores the rule's decision (once: a decided draft keeps its first decision). Not a content change. */
+export async function decideAutoPost(
+  db: Db,
+  userId: string,
+  draftId: string,
+  input: { outcome: AutoPostOutcome; note: string | null; at: Date },
+): Promise<DraftRow | null> {
+  return mapDraft(
+    await db.one(
+      `update public.drafts set auto_post_outcome = $3, auto_post_note = $4, auto_post_decided_at = $5::timestamptz
+        where id = $1 and user_id = $2 and auto_post_requested_at is not null and auto_post_decided_at is null
+        returning *`,
+      [draftId, userId, input.outcome, input.note === null ? null : input.note.slice(0, 1000), input.at],
+    ),
+  )
+}
+
+/** Drafts of a brand the rule approved since `since` (the daily maximum). */
+export async function countAutoPostedSince(db: Db, userId: string, brandId: string, since: Date): Promise<number> {
+  const row = await db.one<{ n: number }>(
+    `select count(*)::int as n from public.drafts
+      where user_id = $1 and brand_id = $2 and auto_post_outcome = 'posted' and auto_post_decided_at > $3::timestamptz`,
+    [userId, brandId, since],
+  )
+  return row?.n ?? 0
+}
+
+/** Drafts still waiting for the rule (their media was processing) that attach `mediaId`. */
+export async function listAwaitingAutoPost(db: Db, userId: string, mediaId: string): Promise<DraftRow[]> {
+  const rows = await db.query(
+    `select d.* from public.drafts d
+      where d.user_id = $1 and d.auto_post_requested_at is not null and d.auto_post_decided_at is null
+        and d.status = 'draft'
+        and exists (select 1 from public.draft_variants v where v.draft_id = d.id and v.user_id = d.user_id and $2::uuid = any(v.media_ids))
+      order by d.created_at limit 50`,
+    [userId, mediaId],
+  )
+  return camelRows<DraftRow>(rows)
 }

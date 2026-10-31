@@ -1,10 +1,13 @@
-// Template renders (render_carousel, render_video): validated input, media only by the user's own
-// asset ids, a job for the media worker, and the worker's outputs stored as render media. The AI
-// then attaches the returned media ids to a draft (which still needs approval).
+// Template renders (render_carousel, render_video) and code videos (render_code_video: an HTML
+// animation the AI wrote, rendered frame by frame): validated input, media only by the user's own
+// asset ids, a job for the media worker, and the worker's outputs stored as render media. The
+// worker makes a draft (which needs approval, unless autoPublish was asked and the brand's
+// Auto-post rule approves it: services/autopost.ts).
 
 import { z } from 'zod'
 import type { Actor, MediaKind } from '@app/core/types'
-import { RenderCarouselInputSchema, RenderVideoInputSchema } from '@app/core/validation'
+import { AppError } from '@app/core/errors'
+import { createScheduleAtSchema, RenderCarouselInputSchema, RenderCodeVideoInputSchema, RenderVideoInputSchema, type AutoPublish } from '@app/core/validation'
 import type { BoundRepos, MediaRow } from '@app/db'
 import { isKeyOwnedBy, parseKey } from '@app/storage'
 import { auditIn } from './audit'
@@ -40,25 +43,46 @@ async function requireOwnMedia(r: BoundRepos, userId: string, ids: readonly stri
   return rows
 }
 
+/** An autoPublish time must be ahead when the AI asks (the worker allows it to pass while rendering). */
+export function checkAutoPublishTime(ctx: Ctx, autoPublish: AutoPublish | undefined): void {
+  const when = autoPublish?.when
+  if (when && when !== 'now' && when !== 'best') fromZod(createScheduleAtSchema(ctx.clock), when, 'autoPublish.when')
+}
+
 export function createRendersService(ctx: Ctx) {
   async function request(
     userId: string,
-    type: 'carousel_render' | 'video_render',
+    type: 'carousel_render' | 'video_render' | 'code_video_render',
     brandId: string,
-    input: z.output<typeof RenderCarouselInputSchema> | z.output<typeof RenderVideoInputSchema>,
+    input: z.output<typeof RenderCarouselInputSchema> | z.output<typeof RenderVideoInputSchema> | z.output<typeof RenderCodeVideoInputSchema>,
     mediaChecks: Array<{ ids: string[]; kinds: MediaKind[] }>,
     via: Actor,
   ): Promise<JobView> {
+    checkAutoPublishTime(ctx, input.autoPublish)
     return ctx.tx(async (r) => {
       const user = await requireUser(r, userId)
       requireCanProcessMedia(userEntitlements(user, ctx.now()))
       const brand = await requireActiveBrand(r, userId, brandId)
       for (const check of mediaChecks) await requireOwnMedia(r, userId, check.ids, check.kinds)
-      const payload = type === 'carousel_render'
-        ? { userId, brandId: brand.id, input: input as z.output<typeof RenderCarouselInputSchema> }
-        : { userId, brandId: brand.id, input: input as z.output<typeof RenderVideoInputSchema> }
+      if (type === 'code_video_render') {
+        // each code render holds a browser for minutes: a few at a time per user
+        const active = (await r.jobs.listForUser(userId, { type, status: ['queued', 'running', 'failed'], limit: 50 })).length
+        if (active >= ctx.config.maxActiveCodeRenders) {
+          throw new AppError('limit_exceeded', `${active} code videos are still rendering. Wait until one is done (post_status with its jobId), then send the next.`, {
+            limit: ctx.config.maxActiveCodeRenders,
+            active,
+          })
+        }
+      }
+      const payload = { userId, brandId: brand.id, input }
       const { job } = await enqueueJob(r, { type, payload } as Parameters<typeof enqueueJob>[1])
-      await auditIn(r, userId, { actor: via, action: `render.requested`, subjectType: 'job', subjectId: job.id, meta: { type } })
+      await auditIn(r, userId, {
+        actor: via,
+        action: `render.requested`,
+        subjectType: 'job',
+        subjectId: job.id,
+        meta: { type, ...(input.autoPublish ? { autoPublish: true } : {}) },
+      })
       return jobView(job)
     })
   }
@@ -80,6 +104,18 @@ export function createRendersService(ctx: Ctx) {
       const checks: Array<{ ids: string[]; kinds: MediaKind[] }> = [{ ids: images, kinds: ['image'] }]
       if (data.audioMediaId) checks.push({ ids: [data.audioMediaId], kinds: ['audio'] })
       return request(uid, 'video_render', data.brandId, data, checks, options.via ?? 'mcp')
+    },
+
+    /**
+     * render_code_video: queues a frame-by-frame render of an HTML animation (≤ 300 KB, 1–60 s,
+     * 24/30 fps). Gated like render_video (plan status: rendering paused while past due or on
+     * hold), plus a few renders at a time per user. Poll jobs.get for the media and draft ids.
+     */
+    async requestCodeVideo(userId: string, input: unknown, options: { via?: Actor } = {}): Promise<JobView> {
+      const uid = userIdOf(userId)
+      const data = fromZod(RenderCodeVideoInputSchema, input, 'Code video')
+      const checks: Array<{ ids: string[]; kinds: MediaKind[] }> = data.audioMediaId ? [{ ids: [data.audioMediaId], kinds: ['audio'] }] : []
+      return request(uid, 'code_video_render', data.brandId, data, checks, options.via ?? 'mcp')
     },
 
     /** Worker: media rows for what it rendered into `users/{userId}/renders/...`. */

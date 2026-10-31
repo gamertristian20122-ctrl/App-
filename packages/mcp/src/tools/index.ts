@@ -2,6 +2,7 @@ import { connectAccount, listAccounts } from './accounts'
 import { approvalDecide, approvalEditVariant, approveDraft, createDraft, listDrafts, postStatus, schedulePost } from './drafts'
 import { getAnalytics, importPastPosts, saveVoiceProfile } from './insights'
 import { getTranscript, makeClips, renderCarousel, renderVideo } from './media'
+import { publishVideo, renderCodeVideo, uploadMedia } from './publish'
 import type { ToolDef } from './types'
 
 export type { ToolDef, ToolAnnotationsFull } from './types'
@@ -22,6 +23,9 @@ export const TOOLS: readonly ToolDef[] = [
   renderCarousel,
   renderVideo,
   getAnalytics,
+  uploadMedia,
+  renderCodeVideo,
+  publishVideo,
   approvalDecide,
   approvalEditVariant,
 ]

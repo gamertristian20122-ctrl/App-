@@ -6,9 +6,11 @@ import { storageErrorReason } from '@app/storage'
 import { isRetryableTranscriptionError, transcriptionErrorReason } from '@app/transcription'
 import { JobAbortedError, PermanentJobError, RetryJobError } from '../errors'
 import type { WorkerContext } from '../types'
+import { renderCodeVideo, type CodeVideoRenderInput, type CodeVideoRenderResult, type CodeVideoTimeouts } from './code-video'
 import type { FetchLike } from './drive'
 import { MediaToolError } from './process'
 import { createChromiumRenderer, RendererUnavailableError, type SlideRenderer } from './renderer'
+import { createPublicFetch } from './safe-fetch'
 
 export interface MediaTimeouts {
   /** ffprobe. */
@@ -42,6 +44,14 @@ export interface DownloadLimits {
 export interface MediaHandlerOptions {
   /** HTTP client for cloud-drive downloads (tests pass a mock). Default: global fetch. */
   fetch?: FetchLike
+  /**
+   * HTTP client for URL imports (links an AI sent). Default: https only, public IP addresses only
+   * (safe-fetch.ts). Tests pass a mock.
+   */
+  importFetch?: FetchLike
+  /** HTML → MP4 for render_code_video. Default: playwright-core Chromium + ffmpeg (code-video.ts). */
+  codeVideo?: (input: CodeVideoRenderInput) => Promise<CodeVideoRenderResult>
+  codeVideoTimeouts?: Partial<CodeVideoTimeouts>
   /** HTML → PNG renderer. Default: playwright-core Chromium (CHROMIUM_PATH, then the bundled one). */
   renderer?: SlideRenderer
   /** Stream stored sources through presigned URLs. Default: when the storage is not local/memory. */
@@ -52,6 +62,9 @@ export interface MediaHandlerOptions {
 
 export interface ResolvedMediaOptions {
   fetch: FetchLike
+  importFetch: FetchLike
+  codeVideo: (input: CodeVideoRenderInput) => Promise<CodeVideoRenderResult>
+  codeVideoTimeouts: Partial<CodeVideoTimeouts>
   renderer: (ctx: WorkerContext) => SlideRenderer
   streamSources: boolean | undefined
   download: DownloadLimits
@@ -62,6 +75,9 @@ export function resolveMediaOptions(options: MediaHandlerOptions = {}): Resolved
   const given = options.renderer
   return {
     fetch: options.fetch ?? ((input, init) => fetch(input, init)),
+    importFetch: options.importFetch ?? createPublicFetch(),
+    codeVideo: options.codeVideo ?? renderCodeVideo,
+    codeVideoTimeouts: options.codeVideoTimeouts ?? {},
     renderer: given ? () => given : (ctx) => createChromiumRenderer({ executablePath: ctx.config.CHROMIUM_PATH ?? null }),
     streamSources: options.streamSources,
     download: {

@@ -39,9 +39,9 @@ export interface CreateMediaInput {
   width?: number | null
   height?: number | null
   sha256?: string | null
-  /** drive_link only: host of the submitted link (allowlisted drive hosts). */
+  /** drive_link / url_import: host of the submitted link (drive links: allowlisted drive hosts). */
   sourceHost?: string | null
-  /** drive_link only: the full https link until it is fetched. */
+  /** drive_link / url_import: the full https link until it is fetched. */
   sourceUrl?: string | null
   rightsAttestedAt?: Date | null
   parentMediaId?: string | null

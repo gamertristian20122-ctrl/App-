@@ -3,7 +3,7 @@
 // (suspend the newest brands above the limit; restore suspended ones when the limit grows).
 
 import { AppError } from '@app/core/errors'
-import { BrandInputSchema, BrandUpdateSchema } from '@app/core/validation'
+import { AutoPostSettingsSchema, BrandInputSchema, BrandUpdateSchema } from '@app/core/validation'
 import type { Actor, BrandStatus } from '@app/core/types'
 import { BrandStatusSchema } from '@app/core/types'
 import type { BoundRepos, BrandRow } from '@app/db'
@@ -197,6 +197,40 @@ export function createBrandsService(ctx: Ctx) {
         if (!row) throw conflict('The brand could not be restored.')
         await auditIn(r, uid, { actor: options.via ?? 'web', action: 'brand.restored', subjectType: 'brand', subjectId: brand.id })
         if (brand.status === 'suspended') await requeueHeldPostsIn(r, uid, ctx.now(), brand.id)
+        return row
+      })
+    },
+
+    /**
+     * The brand's Auto-post switch and settings. Only the person changes it, in the web app
+     * (`via: 'web'`): MCP clients and workers are refused, so an AI can never turn on publishing
+     * without approval. Turning it off takes effect for every draft the rule has not decided yet.
+     */
+    async setAutoPost(userId: string, brandId: string, input: unknown, options: { via?: Actor } = {}): Promise<BrandRow> {
+      const uid = userIdOf(userId)
+      if (options.via !== 'web') {
+        throw new AppError('forbidden', 'Only the account owner can change Auto-post, on the Brands page of the web app.', { reason: 'web_only' })
+      }
+      const data = fromZod(AutoPostSettingsSchema, input, 'Auto-post settings')
+      return ctx.tx(async (r) => {
+        const brand = await requireBrand(r, uid, brandId)
+        if (data.enabled && brand.status === 'archived') throw conflict('This brand is archived. Restore it first.', { brandId: brand.id })
+        const row = await r.brands.setAutoPost(uid, brand.id, {
+          enabled: data.enabled,
+          platforms: data.platforms,
+          dailyMax: data.dailyMax,
+          tiktokPrivacy: data.tiktokPrivacy,
+          updatedAt: ctx.now(),
+        })
+        if (!row) throw conflict('The brand could not be updated.')
+        const action = data.enabled === brand.autoPostEnabled ? 'brand.auto_post_updated' : data.enabled ? 'brand.auto_post_enabled' : 'brand.auto_post_disabled'
+        await auditIn(r, uid, {
+          actor: 'web',
+          action,
+          subjectType: 'brand',
+          subjectId: brand.id,
+          meta: { enabled: data.enabled, platforms: data.platforms, dailyMax: data.dailyMax, tiktokPrivacy: data.tiktokPrivacy },
+        })
         return row
       })
     },

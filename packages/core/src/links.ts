@@ -352,3 +352,164 @@ export function redactUrl(input: string): string {
   const suffix = url.search || url.hash ? '?[redacted]' : ''
   return `${origin}${url.pathname}${suffix}`
 }
+
+// ---------------------------------------------------------------------------
+// Finished-media imports (upload_media sourceUrl): any public https host except video sites
+// ---------------------------------------------------------------------------
+
+export type ImportUrlRefusal = SourceUrlRefusal | 'private_host'
+
+export type ImportUrlCheck = { ok: true; host: string; url: string } | { ok: false; reason: ImportUrlRefusal; message: string }
+
+const SEND_FILE_HINT = 'Send the file itself with upload_media instead (a PUT of the file you made).'
+
+export const IMPORT_URL_MESSAGES: Readonly<Record<ImportUrlRefusal, string>> = {
+  invalid_url: `That is not a valid link. ${SEND_FILE_HINT}`,
+  not_https: `Only https:// links are supported. ${SEND_FILE_HINT}`,
+  has_credentials: `Links with a user name or password are not supported. ${SEND_FILE_HINT}`,
+  has_port: `Links with a port number are not supported. ${SEND_FILE_HINT}`,
+  ip_literal: `Links to an IP address are not supported; use the file's https link with a host name. ${SEND_FILE_HINT}`,
+  video_site_forbidden:
+    'Links to YouTube, TikTok, Instagram, Facebook, X, Vimeo, Twitch and other video sites are not accepted: we only post videos you made, never someone else\'s. ' +
+    SEND_FILE_HINT,
+  host_not_allowed: `That host is not supported. ${SEND_FILE_HINT}`,
+  private_host: `Links to private or local hosts are not supported. ${SEND_FILE_HINT}`,
+}
+
+/** Host names that never resolve to the public internet (or are reserved for docs and tests). */
+const PRIVATE_SUFFIXES = ['localhost', 'local', 'internal', 'intranet', 'lan', 'home', 'corp', 'home.arpa', 'localdomain', 'invalid', 'test', 'example', 'onion', 'arpa']
+
+function isPrivateHostName(host: string): boolean {
+  if (!host.includes('.')) return true // single-label names resolve inside the network
+  return PRIVATE_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`))
+}
+
+/**
+ * Checks a link to a finished video or image an AI made (upload_media sourceUrl). Accepts https
+ * links to public host names; refuses video and social sites (users may only post their own
+ * videos), IP literals, local/private names, ports and credentials. The worker re-checks every
+ * redirect hop and only connects to public IP addresses (isPublicIp).
+ */
+export function checkImportUrl(input: string): ImportUrlCheck {
+  const parsed = parseHttpsUrl(input)
+  const refuse = (reason: ImportUrlRefusal): ImportUrlCheck => ({ ok: false, reason, message: IMPORT_URL_MESSAGES[reason] })
+  if ('refusal' in parsed) return refuse(parsed.refusal)
+  const { url } = parsed
+  const host = url.hostname.toLowerCase().replace(/\.$/, '')
+  if (!host || host.length > 253) return refuse('invalid_url')
+  if (isVideoSiteHost(host)) return refuse('video_site_forbidden')
+  if (isPrivateHostName(host)) return refuse('private_host')
+  url.hostname = host
+  url.hash = ''
+  return { ok: true, host, url: url.toString() }
+}
+
+function parseIpv4(s: string): number[] | null {
+  const parts = s.split('.')
+  if (parts.length !== 4) return null
+  const out: number[] = []
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null
+    const n = Number(p)
+    if (n > 255) return null
+    out.push(n)
+  }
+  return out
+}
+
+/** 16 bytes of an IPv6 address (with :: and an embedded IPv4 tail), or null. */
+function parseIpv6(input: string): number[] | null {
+  let s = input.toLowerCase()
+  if (s.startsWith('[') && s.endsWith(']')) s = s.slice(1, -1)
+  const zone = s.indexOf('%')
+  if (zone >= 0) s = s.slice(0, zone)
+  if (!/^[0-9a-f:.]+$/.test(s) || !s.includes(':')) return null
+  let tail: number[] = []
+  const lastColon = s.lastIndexOf(':')
+  if (s.slice(lastColon + 1).includes('.')) {
+    const v4 = parseIpv4(s.slice(lastColon + 1))
+    if (!v4) return null
+    tail = v4
+    s = `${s.slice(0, lastColon + 1)}0:0`
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const groups = (h: string) => (h === '' ? [] : h.split(':'))
+  const head = groups(halves[0] ?? '')
+  const rest = halves.length === 2 ? groups(halves[1] ?? '') : []
+  const missing = 8 - head.length - rest.length
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null
+  const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...rest]
+  const bytes: number[] = []
+  for (const g of all) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null
+    const n = parseInt(g, 16)
+    bytes.push(n >> 8, n & 0xff)
+  }
+  if (tail.length === 4) bytes.splice(12, 4, ...tail)
+  return bytes
+}
+
+function inV4(ip: number[], base: [number, number, number, number], bits: number): boolean {
+  let left = bits
+  for (let i = 0; i < 4 && left > 0; i++) {
+    const take = Math.min(8, left)
+    const mask = (0xff << (8 - take)) & 0xff
+    if (((ip[i] ?? 0) & mask) !== ((base[i] ?? 0) & mask)) return false
+    left -= take
+  }
+  return true
+}
+
+const V4_BLOCKED: ReadonlyArray<[[number, number, number, number], number]> = [
+  [[0, 0, 0, 0], 8], // "this" network
+  [[10, 0, 0, 0], 8], // private
+  [[100, 64, 0, 0], 10], // carrier-grade NAT
+  [[127, 0, 0, 0], 8], // loopback
+  [[169, 254, 0, 0], 16], // link-local (cloud metadata lives here)
+  [[172, 16, 0, 0], 12], // private
+  [[192, 0, 0, 0], 24], // IETF protocol assignments
+  [[192, 0, 2, 0], 24], // TEST-NET-1
+  [[192, 88, 99, 0], 24], // 6to4 relay
+  [[192, 168, 0, 0], 16], // private
+  [[198, 18, 0, 0], 15], // benchmarking
+  [[198, 51, 100, 0], 24], // TEST-NET-2
+  [[203, 0, 113, 0], 24], // TEST-NET-3
+  [[224, 0, 0, 0], 4], // multicast
+  [[240, 0, 0, 0], 4], // reserved + broadcast
+]
+
+function isPublicV4(ip: number[]): boolean {
+  return !V4_BLOCKED.some(([base, bits]) => inV4(ip, base, bits))
+}
+
+/**
+ * Whether an IP address (v4 or v6 text) is a public unicast address the worker may connect to.
+ * Private, loopback, link-local, CGNAT, multicast, documentation and reserved ranges are refused,
+ * and so are IPv4-mapped / NAT64 / 6to4 / Teredo forms of them. Anything unparseable is refused.
+ */
+export function isPublicIp(address: string): boolean {
+  const v4 = parseIpv4(address.trim())
+  if (v4) return isPublicV4(v4)
+  const b = parseIpv6(address.trim())
+  if (!b) return false
+  const word = (i: number) => ((b[i * 2] ?? 0) << 8) | (b[i * 2 + 1] ?? 0)
+  const embedded = [b[12] ?? 0, b[13] ?? 0, b[14] ?? 0, b[15] ?? 0]
+  const firstSix = [0, 1, 2, 3, 4, 5].map(word)
+  // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible, deprecated)
+  if (firstSix.slice(0, 5).every((w) => w === 0) && (firstSix[5] === 0xffff || firstSix[5] === 0)) {
+    if (firstSix[5] === 0 && word(6) === 0 && word(7) <= 1) return false // :: and ::1
+    return isPublicV4(embedded)
+  }
+  // 64:ff9b::/96 (NAT64) carries an IPv4 address
+  if (word(0) === 0x64 && word(1) === 0xff9b && [2, 3, 4, 5].every((i) => word(i) === 0)) return isPublicV4(embedded)
+  // 2002::/16 (6to4) carries an IPv4 address in bits 16–47
+  if (word(0) === 0x2002) return isPublicV4([b[2] ?? 0, b[3] ?? 0, b[4] ?? 0, b[5] ?? 0])
+  const first = b[0] ?? 0
+  if ((first & 0xe0) !== 0x20) return false // only global unicast 2000::/3
+  if (word(0) === 0x2001 && word(1) === 0) return false // Teredo 2001::/32
+  if (word(0) === 0x2001 && word(1) === 0x0db8) return false // documentation
+  if (word(0) === 0x2001 && (word(1) & 0xfff0) === 0x0010) return false // ORCHID
+  if (word(0) === 0x3fff && (word(1) & 0xf000) === 0) return false // documentation 3fff::/20
+  return true
+}

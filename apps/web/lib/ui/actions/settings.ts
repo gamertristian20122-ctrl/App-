@@ -3,11 +3,11 @@
 // the input with the core zod schemas and enforces plan limits) and returns a short result.
 // Server-only.
 
-import { CAPTION_STYLES, EMOJI_POLICIES, HASHTAG_POLICIES } from '@app/core/validation'
-import { PLATFORM_LABELS, type Platform } from '@app/core/types'
+import { CAPTION_STYLES, EMOJI_POLICIES, HASHTAG_POLICIES, TIKTOK_PRIVACY_LEVELS } from '@app/core/validation'
+import { PLATFORM_LABELS, PlatformSchema, type Platform } from '@app/core/types'
 import type { Services } from '@app/services'
 import { failed, failure, success, type ActionResult } from '../action-result'
-import { blocks, checkbox, id, lines, nonEmpty, platform, text, timeZone, type Fields } from '../form'
+import { blocks, checkbox, id, integer, lines, nonEmpty, platform, text, timeZone, type Fields } from '../form'
 
 const MISSING = 'This page is out of date. Reload it and try again.'
 
@@ -57,6 +57,37 @@ export async function restoreBrand(services: Services, userId: string, fd: Field
   try {
     const brand = await services.brands.restore(userId, brandId, { via: 'web' })
     return success(`Restored “${brand.name}”. Reconnect its accounts to publish again.`)
+  } catch (error) {
+    return failure(error)
+  }
+}
+
+/**
+ * The brand's Auto-post switch (Brands page). Only here, signed in as the owner, with
+ * { via: 'web' }: services refuse the change from MCP clients and workers.
+ */
+export async function setAutoPost(services: Services, userId: string, fd: Fields): Promise<ActionResult> {
+  const brandId = id(fd, 'brandId')
+  if (!brandId) return failed(MISSING)
+  const enabled = checkbox(fd, 'enabled')
+  const platforms = fd
+    .getAll('platforms')
+    .map((p) => PlatformSchema.safeParse(p))
+    .flatMap((r) => (r.success ? [r.data] : []))
+  const dailyMax = integer(fd, 'dailyMax', 1, 25)
+  if (dailyMax === null) return failed('The daily limit must be a whole number from 1 to 25.')
+  const privacy = text(fd, 'tiktokPrivacy', { max: 40 })
+  const tiktokPrivacy = TIKTOK_PRIVACY_LEVELS.find((l) => l === privacy) ?? null
+  try {
+    const brand = await services.brands.setAutoPost(
+      userId,
+      brandId,
+      { enabled, platforms: [...new Set(platforms)], dailyMax: dailyMax ?? 3, tiktokPrivacy },
+      { via: 'web' },
+    )
+    if (!brand.autoPostEnabled) return success(`Auto-post is off for “${brand.name}”. Videos your AI sends wait for your approval.`)
+    const where = brand.autoPostPlatforms.length > 0 ? brand.autoPostPlatforms.map((p) => PLATFORM_LABELS[p]).join(', ') : 'every connected platform'
+    return success(`Auto-post is on for “${brand.name}” (${where}, up to ${brand.autoPostDailyMax} a day).`)
   } catch (error) {
     return failure(error)
   }

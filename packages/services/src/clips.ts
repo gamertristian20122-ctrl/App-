@@ -6,7 +6,7 @@
 import { AppError } from '@app/core/errors'
 import { PLATFORM_RULES, blockingIssues, validateVariant } from '@app/core/platforms'
 import type { Actor, ClipStatus, Platform, TimedText } from '@app/core/types'
-import { ClipStatusSchema } from '@app/core/types'
+import { ClipStatusSchema, PlatformSchema } from '@app/core/types'
 import { ClipRequestSchema, IdSchema, validateClipRanges } from '@app/core/validation'
 import type { BoundRepos, ClipRow, DraftRow, MediaRow, VariantInput } from '@app/db'
 import { clipKey } from '@app/storage'
@@ -29,6 +29,7 @@ import { mediaFacts } from './drafts'
 import { requireCanProcessMedia, userEntitlements } from './entitlements'
 import { enqueueJob } from './jobs'
 import { isClipSource } from './media'
+import { checkAutoPublishTime } from './renders'
 
 /** Clip statuses that count toward the per-source limit. */
 const ACTIVE_CLIP_STATUSES: ClipStatus[] = ['queued', 'rendering', 'ready']
@@ -92,6 +93,7 @@ export function createClipsService(ctx: Ctx) {
     async requestClips(userId: string, input: unknown, options: { brandId?: string; via?: Actor } = {}): Promise<ClipRow[]> {
       const uid = userIdOf(userId)
       const data = fromZod(ClipRequestSchema, input, 'Clip request')
+      checkAutoPublishTime(ctx, data.autoPublish)
       const max = ctx.config.maxClipsPerRequest
       if (data.ranges.length > max) throw validation(`Ask for at most ${max} clips at a time.`, { limit: max })
       return ctx.tx(async (r) => {
@@ -148,7 +150,11 @@ export function createClipsService(ctx: Ctx) {
           })),
         )
         for (const clip of clips) {
-          await enqueueJob(r, { type: 'clip_render', payload: { userId: uid, clipId: clip.id }, idempotencyKey: `clip_render:${clip.id}` })
+          await enqueueJob(r, {
+            type: 'clip_render',
+            payload: { userId: uid, clipId: clip.id, ...(data.autoPublish ? { autoPublish: data.autoPublish } : {}) },
+            idempotencyKey: `clip_render:${clip.id}`,
+          })
         }
         await auditIn(r, uid, {
           actor: options.via ?? 'mcp',
@@ -205,9 +211,15 @@ export function createClipsService(ctx: Ctx) {
      * clip_render result: the file is in storage at clipKey(userId, clipId). Creates the output
      * media and a draft (variants for the brand's connected video platforms; no approval).
      */
-    async completeRender(userId: string, clipId: string, output: RenderOutput): Promise<{ clip: ClipRow; draft: DraftRow | null }> {
+    async completeRender(
+      userId: string,
+      clipId: string,
+      output: RenderOutput,
+      options: { platforms?: readonly Platform[] } = {},
+    ): Promise<{ clip: ClipRow; draft: DraftRow | null }> {
       const uid = userIdOf(userId)
       const data = fromZod(RenderOutputSchema, output, 'Render result')
+      const only = options.platforms ? fromZod(PlatformSchema.array().max(9), [...options.platforms], 'Platforms') : null
       return ctx.tx(async (r) => {
         const clip = await requireClip(r, uid, clipId)
         if (clip.status === 'ready' && clip.outputMediaId) {
@@ -236,7 +248,7 @@ export function createClipsService(ctx: Ctx) {
             createdVia: 'worker',
             sourceClipId: clip.id,
             notes: text ? `Clip: ${text}`.slice(0, 2_000) : null,
-            variants: await draftVariantsIn(r, uid, clip, media),
+            variants: (await draftVariantsIn(r, uid, clip, media)).filter((v) => !only || only.includes(v.platform)),
           })
           draft = created.draft
         }

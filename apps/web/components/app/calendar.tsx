@@ -4,7 +4,7 @@
 import Link from 'next/link'
 import { PlatformBadge } from '@/components/platform/platform-badge'
 import { ActionForm, SubmitButton, type FormAction } from '@/components/ui/action-form'
-import { Card, EmptyState, LinkButton, PageHeader, StatusPill } from '@/components/ui/primitives'
+import { Badge, Card, EmptyState, LinkButton, PageHeader, StatusPill } from '@/components/ui/primitives'
 import { button, cx, link } from '@/components/ui/styles'
 import type { CalendarData, CalendarEntry } from '@/lib/ui/data'
 import { excerpt, formatTime, plural } from '@/lib/ui/format'
@@ -28,6 +28,7 @@ function Entry({ entry, timezone, showBrand, actions }: { entry: CalendarEntry; 
         </time>
         <PlatformBadge platform={post.platform} />
         <StatusPill status={post.status} />
+        {post.approvedVia === 'auto_post' ? <Badge tone="info">Auto-posted</Badge> : null}
         {showBrand ? <span className="text-xs text-neutral-500">{entry.brandName}</span> : null}
       </div>
       <p className="mt-1.5 text-sm text-neutral-700 dark:text-neutral-300">{excerpt(entry.title ? `${entry.title}: ${entry.text}` : entry.text, 200)}</p>

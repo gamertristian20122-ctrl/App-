@@ -15,6 +15,8 @@ export interface RenderDraftInput {
   text: string
   title: string
   notes: string
+  /** Only these platforms (an autoPublish request's list); default: every connected one that takes the media. */
+  platforms?: readonly Platform[] | undefined
 }
 
 export interface RenderDraftResult {
@@ -66,6 +68,7 @@ export async function createRenderDraft(ctx: Pick<WorkerContext, 'services'>, us
   for (const account of accounts) {
     const platform = account.platform
     if (seen.has(platform)) continue
+    if (input.platforms && !input.platforms.includes(platform)) continue
     seen.add(platform)
     const rules = PLATFORM_RULES[platform]
     if (input.kind === 'photos' ? !rules.image : !rules.video) continue

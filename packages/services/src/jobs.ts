@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { AppError, fromZodError } from '@app/core/errors'
 import { backoffMs } from '@app/core/time'
 import { JOB_TYPES, PLATFORMS, type JobRow, type JobType } from '@app/core/types'
-import { IdSchema, RenderCarouselInputSchema, RenderVideoInputSchema } from '@app/core/validation'
+import { AutoPublishSchema, IdSchema, RenderCarouselInputSchema, RenderCodeVideoInputSchema, RenderVideoInputSchema } from '@app/core/validation'
 import type { BoundRepos } from '@app/db'
 import { errorMessage, id, notFound, userIdOf, withErrors, type Ctx } from './context'
 
@@ -17,7 +17,8 @@ export const JOB_PAYLOAD_SCHEMAS = {
   check_post_status: z.object({ userId: Uuid, postId: Uuid, poll: z.number().int().min(0).default(0) }),
   source_ingest: z.object({ userId: Uuid, mediaId: Uuid }),
   transcribe: z.object({ userId: Uuid, mediaId: Uuid, language: z.string().min(2).max(16).optional() }),
-  clip_render: z.object({ userId: Uuid, clipId: Uuid }),
+  /** autoPublish: the clip's draft goes through the brand's Auto-post rule when it is rendered. */
+  clip_render: z.object({ userId: Uuid, clipId: Uuid, autoPublish: AutoPublishSchema.optional() }),
   carousel_render: z.object({ userId: Uuid, brandId: Uuid, input: RenderCarouselInputSchema }),
   video_render: z.object({ userId: Uuid, brandId: Uuid, input: RenderVideoInputSchema }),
   analytics_pull: z.discriminatedUnion('scope', [
@@ -32,6 +33,9 @@ export const JOB_PAYLOAD_SCHEMAS = {
     limit: z.number().int().min(1).max(200).default(50),
   }),
   cleanup: z.object({ task: z.enum(['all', 'expired', 'sources']).default('all') }),
+  code_video_render: z.object({ userId: Uuid, brandId: Uuid, input: RenderCodeVideoInputSchema }),
+  /** Fetch a finished video/image from media.source_url (upload_media sourceUrl). */
+  url_import: z.object({ userId: Uuid, mediaId: Uuid }),
 } as const satisfies Record<JobType, z.ZodType>
 
 export type JobPayload<T extends JobType> = z.output<(typeof JOB_PAYLOAD_SCHEMAS)[T]>

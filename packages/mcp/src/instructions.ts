@@ -1,12 +1,17 @@
 /** Server instructions (sent in initialize / server/discover): the workflow every AI should follow. */
 export const SERVER_INSTRUCTIONS = [
-  'This server plans, drafts, approves and schedules social media posts for the user\'s brands (TikTok, YouTube, Instagram, Facebook, Threads, X, LinkedIn, Pinterest, Bluesky), cuts vertical clips from the user\'s own videos, and reports analytics.',
+  'This server plans, drafts, approves and schedules social media posts for the user\'s brands (TikTok, YouTube, Instagram, Facebook, Threads, X, LinkedIn, Pinterest, Bluesky), cuts vertical clips from the user\'s own videos, posts videos you make, and reports analytics.',
   '',
   'Workflow:',
   '1. Connect: call list_accounts to get brand ids and connected accounts. To add one, call connect_account and give the user the link; they sign in to the platform themselves (never ask for passwords or API keys).',
   '2. Draft: read the brand\'s writing brief first (list_accounts with the brandId: voice profile, best past posts, platform limits), write in that voice, then save ONE draft with a variant per platform via create_draft. Fix any limit errors exactly as reported. (The user may also start the write_post prompt, which loads the same brief.)',
   '3. Approve: call approve_draft. It shows the user an approval card (or a web link) where only the user can approve, edit or reject. You can never approve yourself; wait for their decision.',
   '4. Schedule: once approved, call schedule_post with a time the user agreed to (ISO 8601 with offset, or "now"). Check results with post_status. Editing a draft after approval requires a new approval.',
+  '',
+  'Videos you make (the auto pipeline): make the video, then send it, then publish it.',
+  '- Send it: coding assistants with a shell call upload_media (filename, contentType, exact bytes) and run the curl command it returns; any assistant can instead give upload_media a sourceUrl (an https link to a finished video another tool rendered; never YouTube/TikTok/Instagram/X or other video-site links). Or write the animation as one self-contained HTML document and call render_code_video (we render the MP4).',
+  '- Publish it: publish_video { brandId, mediaId, caption, platforms?, when?: "now" | "best" | ISO time }. If the user turned on Auto-post for the brand on the website, it is approved by that rule and scheduled (within their platform list and daily limit; platform rules and caps still apply). Otherwise, or when a check fails, it returns the approval card and the reason: the user decides. render_video, render_carousel, make_clips and render_code_video accept autoPublish to do the same when their render finishes.',
+  '- Auto-post is the user\'s switch: you cannot turn it on or change it (list_accounts shows it read-only). Never present a post as published before post_status says so.',
   '',
   'Clips: get_transcript (no arguments lists the media library with ids) → get_transcript { mediaId } (the transcript plus the clip-picking rules; page with nextStartMs; ranges of 5 minutes or less add word timings) → make_clips with millisecond ranges → each clip becomes a draft to approve. Only the user\'s own uploads or cloud-drive videos can be clipped; YouTube links are not accepted.',
   'Voice: import_past_posts and save_voice_profile teach the brand voice (save_voice_profile replaces the whole profile: read it with list_accounts first). Analytics: get_analytics; with a brandId it adds the week-over-week review and how to propose experiments.',

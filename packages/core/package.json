@@ -17,6 +17,7 @@
     "./errors": "./src/errors.ts",
     "./config": "./src/config.ts",
     "./time": "./src/time.ts",
+    "./autopost": "./src/autopost.ts",
     "./testing": "./src/testing.ts"
   },
   "scripts": {
