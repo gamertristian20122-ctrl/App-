@@ -35,7 +35,7 @@ Add-ons: $3 per extra brand, $1 per extra clipping hour. X posts that contain a 
 ## House rules
 
 - All posting goes through the `PostingProvider` interface. Upload-Post is the first implementation; direct platform APIs come later as separate adapters. Nothing outside the adapter may call Upload-Post directly.
-- Nothing publishes without approval. Every post and clip is saved as a draft first.
+- Nothing publishes without approval. Every post and clip is saved as a draft first. A draft is approved either by the user (approval card or web app) or by the brand's Auto-post switch, which only the user can turn on, in the web app (never through MCP). Platform caps and validation apply either way.
 - Every MCP tool has a `title` and a `readOnlyHint` or `destructiveHint` annotation (required by Claude's connector directory).
 - Validate everything an AI sends us (timestamps, post text, platform limits) before acting on it. Never trust tool input.
 - Respect platform caps in the scheduler: Instagram 100 API posts per account per 24 hours, TikTok about 15 per creator per day.
@@ -46,7 +46,7 @@ Add-ons: $3 per extra brand, $1 per extra clipping hour. X posts that contain a 
 
 ## MCP surface (v1)
 
-- **Tools:** `connect_account`, `list_accounts`, `create_draft`, `list_drafts`, `approve_draft`, `schedule_post`, `post_status`, `get_transcript`, `make_clips`, `import_past_posts`, `save_voice_profile`, `render_carousel`, `render_video`, `get_analytics`
+- **Tools:** `connect_account`, `list_accounts`, `create_draft`, `list_drafts`, `approve_draft`, `schedule_post`, `post_status`, `get_transcript`, `make_clips`, `import_past_posts`, `save_voice_profile`, `render_carousel`, `render_video`, `get_analytics`, `upload_media` (coding AIs send finished files), `render_code_video` (chat AIs send an HTML animation; we render the MP4), `publish_video` (one call: video + captions → draft → posted automatically when the brand's Auto-post switch is on, otherwise the approval card)
 - **Prompts:** `write_post` (loads the voice profile), `pick_clips` (rules for standalone moments with a hook), `weekly_review`
 - **MCP App:** an approval card for `approve_draft` with a per-platform preview and Approve, Edit and Reject buttons.
 
