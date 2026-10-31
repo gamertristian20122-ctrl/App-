@@ -748,6 +748,79 @@ async function pageScreenshots(ctx: Ctx): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Owner setup page and legal pages
+// ---------------------------------------------------------------------------------------------
+
+async function setupAndLegal(ctx: Ctx): Promise<void> {
+  const { page, watcher, app } = ctx
+  // the e2e user is OWNER_EMAIL: /setup shows the checklist against the fake services
+  const res = await page.goto('/setup', { waitUntil: 'networkidle' })
+  assertEqual(res?.status(), 200, '/setup status for the owner')
+  await assertHealthyPage(page, '/setup', watcher)
+  const text = await page.locator('main').innerText()
+  assertMatch(text, /Launch setup/, '/setup heading')
+  assertMatch(text, /TEST MODE: posts are not really published/, '/setup test-mode banner')
+  const status = async (id: string) => page.locator(`[data-check="${id}"]`).getAttribute('data-status')
+  assertEqual(await status('database.connection'), 'ok', 'setup: database connection')
+  assertEqual(await status('database.migrations'), 'ok', 'setup: migrations up to date')
+  assertEqual(await status('posting.provider'), 'attention', 'setup: fake posting provider flagged')
+  assertEqual(await status('storage.bucket'), 'unset', 'setup: local storage is not R2')
+  assertEqual(await status('stripe.key'), 'unset', 'setup: no Stripe key')
+  // the worker's heartbeat (both groups run in one e2e worker)
+  assertEqual(await status('workers.posting'), 'ok', 'setup: posting worker seen')
+  assertEqual(await status('workers.media'), 'ok', 'setup: media worker seen')
+  assertMatch(await page.locator('[data-check="workers.media"]').innerText(), /Last seen \d+ seconds? ago/, 'setup: worker last seen')
+  assertMatch(await page.locator('[data-check="connect.mcp"]').innerText(), new RegExp(`${app.appUrl}/api/mcp`), 'setup: MCP URL')
+  const html = await page.content()
+  for (const key of ['SESSION_SECRET', 'TOKEN_ENCRYPTION_KEYS', 'CRON_SECRET']) {
+    const value = app.env[key] as string
+    assert(value && !html.includes(value), `/setup shows ${key}`)
+    for (const part of value.split(',')) assert(!html.includes(part.replace(/^v\d+:/, '')), `/setup shows part of ${key}`)
+  }
+  // the owner's dashboard links to it
+  await page.goto('/app', { waitUntil: 'load' })
+  assert((await page.locator('nav[aria-label="Dashboard"] a[href="/setup"]').count()) === 1, 'the owner’s navigation lacks Setup')
+  if (SCREENSHOTS) {
+    const mobile = await ctx.browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, baseURL: app.appUrl })
+    await mobile.addCookies(await ctx.context.cookies())
+    const m = await mobile.newPage()
+    await capture(m, 'setup-mobile', '/setup', { watcher: watchPage(m) })
+    await mobile.close()
+  }
+
+  // another signed-in user, and a signed-out visitor, get a 404 (and no nav link)
+  const other = await ctx.browser.newContext({ baseURL: app.appUrl })
+  try {
+    const p = await other.newPage()
+    await p.goto('/login')
+    await p.locator('#dev-email').fill('someone-else@example.com')
+    await Promise.all([p.waitForURL(/\/app(\?|$)/, { timeout: 30_000 }), p.locator('#dev-email').press('Enter')])
+    assert((await p.locator('a[href="/setup"]').count()) === 0, 'a non-owner sees the Setup link')
+    const denied = await p.goto('/setup')
+    assertEqual(denied?.status(), 404, '/setup for a non-owner')
+    assert(!/Launch setup/.test(await p.locator('body').innerText()), 'a non-owner sees the checklist')
+  } finally {
+    await other.close()
+  }
+  const anon = await fetch(`${app.appUrl}/setup`, { redirect: 'manual' })
+  assertEqual(anon.status, 404, '/setup signed out')
+
+  // legal pages: public, with placeholders for the unset values, linked from the footers
+  for (const path of ['/privacy', '/terms', '/contact']) {
+    const r = await fetch(`${app.appUrl}${path}`)
+    assertEqual(r.status, 200, `${path} status`)
+    const body = await r.text()
+    assertMatch(body, /\[set SUPPORT_EMAIL\]/, `${path} shows the SUPPORT_EMAIL placeholder`)
+    for (const link of ['/privacy', '/terms', '/contact']) assert(body.includes(`href="${link}"`), `${path} footer lacks ${link}`)
+  }
+  assertMatch(await (await fetch(`${app.appUrl}/terms`)).text(), /Subscriptions, cancellation and refunds/, '/terms refunds section')
+  for (const path of ['/', '/login']) {
+    const body = await (await fetch(`${app.appUrl}${path}`)).text()
+    for (const link of ['/privacy', '/terms', '/contact']) assert(body.includes(`href="${link}"`), `${path} footer lacks ${link}`)
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Security checks at the end (the last one revokes our tokens)
 // ---------------------------------------------------------------------------------------------
 
@@ -769,7 +842,7 @@ async function securityChecks(ctx: Ctx): Promise<void> {
   assert(asMeta.registration_endpoint, 'AS metadata lacks registration_endpoint')
 
   // the proxy (formerly middleware) keeps the consent and approval pages out of frames and referrers
-  for (const path of ['/oauth/authorize?response_type=code&client_id=nope', '/approve/not-a-real-nonce-but-long-enough']) {
+  for (const path of ['/oauth/authorize?response_type=code&client_id=nope', '/approve/not-a-real-nonce-but-long-enough', '/setup']) {
     const res = await ctx.context.request.get(path, { maxRedirects: 0 })
     const h = res.headers()
     assertEqual(h['x-frame-options'], 'DENY', `${path} x-frame-options`)
@@ -822,7 +895,7 @@ async function main(): Promise<void> {
 
   try {
     app = await check('infrastructure: postgres, migrations, web build + start, worker', () =>
-      startApp({ runDir: RUN_DIR, pgDir: PG_DIR, skipBuild: Boolean(args['skip-build']), whisper: Boolean(args.whisper), videoSeconds: VIDEO_SECONDS }),
+      startApp({ runDir: RUN_DIR, pgDir: PG_DIR, skipBuild: Boolean(args['skip-build']), whisper: Boolean(args.whisper), videoSeconds: VIDEO_SECONDS, ownerEmail: EMAIL }),
     )
     const browser = await playwright.chromium.launch({ headless: true })
     onStop('chromium', () => browser.close())
@@ -861,6 +934,7 @@ async function main(): Promise<void> {
     await check('web: a YouTube drive link is refused (client and server)', () => driveLinkRefused(ctx))
     await check('approval card in an MCP Apps host harness (Approve → approval_decide)', () => cardHarness(ctx))
     await check('web: /approve/[nonce] one-click approval', () => webApproval(ctx))
+    await check('setup: the owner sees /setup with the fake services (worker heartbeat, no secrets); others get 404; legal pages', () => setupAndLegal(ctx))
     if (SCREENSHOTS) await check('screenshots of every page', () => pageScreenshots(ctx))
     await check('security: 401 + WWW-Authenticate, page headers, invalid token, refresh-token reuse', () => securityChecks(ctx))
 

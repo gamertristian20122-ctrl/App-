@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { MIGRATION_NAMES } from './migration-names'
 import type { Db } from './types'
 
 export interface MigrationFile {
@@ -137,4 +138,32 @@ export async function migrate(db: Db, dir: string = findMigrationsDir(), options
     })
   }
   return result
+}
+
+/** Names of the migrations recorded in schema_migrations ([] when the table does not exist yet). */
+export async function appliedMigrationNames(db: Db): Promise<string[]> {
+  const table = await db.one<{ t: string | null }>(`select to_regclass('public.schema_migrations')::text as t`)
+  if (!table?.t) return []
+  const rows = await db.query<{ name: string }>('select name from public.schema_migrations order by version')
+  return rows.map((r) => r.name)
+}
+
+export interface MigrationStatus {
+  /** Migrations this code needs that the database does not have yet. */
+  pending: string[]
+  /** Migrations the database has that this code does not know (the database is newer). */
+  unknown: string[]
+  applied: string[]
+}
+
+/** Compares the database with the migrations this code expects (default: MIGRATION_NAMES). */
+export async function migrationStatus(db: Db, expected: readonly string[] = MIGRATION_NAMES): Promise<MigrationStatus> {
+  const applied = await appliedMigrationNames(db)
+  const have = new Set(applied)
+  const want = new Set(expected)
+  return {
+    pending: expected.filter((name) => !have.has(name)),
+    unknown: applied.filter((name) => !want.has(name)),
+    applied,
+  }
 }

@@ -6,7 +6,7 @@ import type { Transcriber } from '@app/core/ports'
 import { AssemblyAITranscriber, type AssemblyAIOptions } from './assemblyai'
 import { transcriptionError } from './errors'
 import { FakeTranscriber, type FakeTranscriberOptions } from './fake'
-import { createFallbackTranscriber } from './fallback'
+import { createFallbackTranscriber, engineHealth, type EngineHealth } from './fallback'
 import type { FetchLike } from './shared'
 import { WhisperTranscriber, type WhisperOptions } from './whisper'
 
@@ -64,4 +64,33 @@ export function createTranscriberFromConfig(config: TranscriptionConfig, deps: T
     default:
       throw transcriptionError('input_invalid', 'Unknown TRANSCRIPTION_PROVIDER.')
   }
+}
+
+/**
+ * Health of every engine TRANSCRIPTION_PROVIDER uses (chain: Whisper and AssemblyAI), for the
+ * owner's /setup page. A missing setting is reported as that engine not being OK. Never throws.
+ */
+export async function checkTranscriptionHealth(config: TranscriptionConfig, deps: TranscriptionFactoryDeps = {}): Promise<EngineHealth[]> {
+  const builders: Array<[string, () => Transcriber]> =
+    config.TRANSCRIPTION_PROVIDER === 'chain'
+      ? [
+          ['whisper', () => whisperFrom(config, deps)],
+          ['assemblyai', () => assemblyFrom(config, deps)],
+        ]
+      : config.TRANSCRIPTION_PROVIDER === 'whisper'
+        ? [['whisper', () => whisperFrom(config, deps)]]
+        : config.TRANSCRIPTION_PROVIDER === 'assemblyai'
+          ? [['assemblyai', () => assemblyFrom(config, deps)]]
+          : [['fake', () => new FakeTranscriber(deps.fake)]]
+  return Promise.all(
+    builders.map(async ([engine, build]) => {
+      let transcriber: Transcriber
+      try {
+        transcriber = build()
+      } catch (err) {
+        return { engine, ok: false, detail: err instanceof Error ? err.message : 'This engine is not configured.' }
+      }
+      return engineHealth(transcriber)
+    }),
+  )
 }

@@ -4,11 +4,12 @@
 // can run against PGlite-backed services, a fake Stripe and mocked HTTP without touching
 // lib/services.ts or the network. Server-only.
 
-import type { EnvSource } from '@app/core/config'
-import type { ServicesFromEnv } from '@app/services'
+import type { Config, EnvSource } from '@app/core/config'
+import type { EngineHealth, ServicesFromEnv } from '@app/services'
 import type { AuthDeps } from '@/lib/auth'
 import { getServicesRuntime } from '@/lib/services'
 import type { StripeApi } from './stripe'
+import type { StripeAdminApi } from './stripe-admin'
 
 export interface ServerOverrides {
   /** A prebuilt runtime (tests: createServicesFromEnv(env, { db: PGlite, provider: fake, ... })). */
@@ -17,8 +18,12 @@ export interface ServerOverrides {
   env?: EnvSource
   /** Stripe API client; null = Stripe is not configured. Default: built from STRIPE_SECRET_KEY. */
   stripe?: StripeApi | null
-  /** fetch used for Supabase Auth calls (tests: a mock). */
+  /** fetch used for Supabase Auth calls and the /setup checks (tests: a mock). */
   fetch?: typeof fetch
+  /** Stripe account setup API for /setup; null = Stripe is not configured. Default: from STRIPE_SECRET_KEY. */
+  stripeAdmin?: StripeAdminApi | null
+  /** Transcription health for /setup (tests: a stub). Default: one cheap call per configured engine. */
+  transcriptionHealth?: (config: Config) => Promise<EngineHealth[]>
 }
 
 const KEY = Symbol.for('app.web.server.overrides')

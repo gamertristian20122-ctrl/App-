@@ -19,6 +19,8 @@ export interface AppOptions {
   whisper: boolean
   /** Length of the source video (for the Whisper stub's canned transcript). */
   videoSeconds: number
+  /** OWNER_EMAIL: the account that may open /setup. */
+  ownerEmail: string
 }
 
 export interface App {
@@ -137,6 +139,8 @@ export async function startApp(options: AppOptions): Promise<App> {
     STRIPE_SECRET_KEY: '',
     STRIPE_WEBHOOK_SECRET: '',
     UPLOAD_POST_API_KEY: '',
+    // the e2e user is the owner (/setup); the legal values stay unset (the pages show placeholders)
+    OWNER_EMAIL: options.ownerEmail,
     POSTING_PROVIDER: 'fake',
     STORAGE_DRIVER: 'fs',
     STORAGE_FS_DIR: storageDir,

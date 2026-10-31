@@ -14,10 +14,10 @@
 
 import { z } from 'zod'
 import type { Logger } from '@app/core/log'
-import type { TranscriptResult, Transcriber } from '@app/core/ports'
+import type { HealthCheckResult, TranscriptResult, Transcriber } from '@app/core/ports'
 import { transcriptionError } from './errors'
 import { normalizeTranscript, type RawTiming } from './normalize'
-import { checkInput, fetchWithTimeout, httpError, openAudioFile, readJson, type FetchLike, type TranscribeInput } from './shared'
+import { checkInput, fetchWithTimeout, httpError, openAudioFile, probeStatus, readJson, type FetchLike, type TranscribeInput } from './shared'
 
 export interface WhisperOptions {
   /** Base URL of the server (WHISPER_URL). */
@@ -95,6 +95,21 @@ export class WhisperTranscriber implements Transcriber {
     this.maxFileBytes = options.maxFileBytes ?? WHISPER_DEFAULT_MAX_FILE_BYTES
     this.fetchFn = options.fetch ?? ((input, init) => fetch(input, init))
     this.logger = options.logger
+  }
+
+  /**
+   * Is the server reachable (and does it accept WHISPER_API_KEY)? GET {base}/v1/models, the
+   * cheapest call OpenAI-compatible servers offer. A 404 still proves the server answers. Never throws.
+   */
+  async healthCheck(): Promise<HealthCheckResult> {
+    const url = this.endpoint.replace(/\/audio\/transcriptions$/, '/models')
+    const headers: Record<string, string> = { accept: 'application/json' }
+    if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`
+    const status = await probeStatus(this.fetchFn, url, headers)
+    if (status === null) return { ok: false, detail: 'The Whisper server could not be reached at WHISPER_URL.' }
+    if (status === 401 || status === 403) return { ok: false, detail: 'The Whisper server refused WHISPER_API_KEY.' }
+    if (status >= 500) return { ok: false, detail: `The Whisper server answered with an error (HTTP ${status}).` }
+    return { ok: true, detail: 'The Whisper server answered.' }
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscriptResult> {

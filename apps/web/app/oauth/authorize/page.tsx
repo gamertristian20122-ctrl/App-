@@ -4,6 +4,7 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import type { ReactNode } from 'react'
+import { LegalLinks } from '@/components/legal/legal-links'
 import { getCurrentUser } from '@/lib/auth'
 import { authDeps, getRuntime } from '@/lib/server/deps'
 import { AUTHORIZE_PARAMS, describeScopes, loadConsent } from '@/lib/server/oauth'
@@ -23,6 +24,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6 py-12">
       <div className="rounded-2xl border border-neutral-200 p-6 shadow-sm dark:border-neutral-800">{children}</div>
+      <LegalLinks className="mt-6 justify-center text-xs text-neutral-500" />
     </main>
   )
 }

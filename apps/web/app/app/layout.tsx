@@ -5,11 +5,13 @@ import type { Metadata } from 'next'
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 import { AppNav, BrandSwitcher, type NavItem } from '@/components/app/shell'
+import { LegalFooter } from '@/components/legal/legal-links'
 import { Notice } from '@/components/ui/primitives'
 import { Logo } from '@/components/ui/logo'
 import { button, cx } from '@/components/ui/styles'
 import { Toaster } from '@/components/ui/toaster'
 import { loadShell } from '@/lib/ui/data'
+import { isOwner } from '@/lib/server/owner'
 import { currentUser, getUiRuntime } from '@/lib/ui/runtime'
 import { preferredBrandId } from '@/lib/ui/server'
 import { selectBrandAction } from './actions'
@@ -43,6 +45,8 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     { href: '/app/billing', label: 'Billing' },
     { href: '/app/connect', label: 'Connect your AI' },
   ]
+  // the launch checklist, for the person who runs this deployment only (OWNER_EMAIL)
+  if (isOwner(user, rt.ownerEmail ?? null)) nav.push({ href: '/setup', label: 'Setup' })
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950">
@@ -92,6 +96,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           {children}
         </main>
       </div>
+      <LegalFooter className="border-t border-neutral-200 dark:border-neutral-800" />
       <Toaster />
     </div>
   )

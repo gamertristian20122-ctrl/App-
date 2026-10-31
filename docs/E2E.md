@@ -94,16 +94,23 @@ The script uses packages the workspace already has (no new dependencies):
     `approval_decide`; the draft is approved via `mcp`.
 13. **One-click web approval.** `/approve/<card nonce>` for a clip draft: Approve is disabled until
     the TikTok privacy is saved (which moves to a fresh nonce), then Approve → approved via `web`.
-14. **Screenshots** (1440x900, plus a 390x844 landing page) with a health check on each page:
+14. **Owner setup and legal pages.** The e2e user is `OWNER_EMAIL`: `/setup` answers 200 with the
+    TEST MODE banner, the database and migrations OK, the fake posting provider flagged, local
+    storage and Stripe "Not set", both workers "last seen N seconds ago" (their heartbeat), the MCP
+    URL, and none of the generated secrets in the HTML; the owner's navigation links to it.
+    Another signed-in user (no Setup link) and a signed-out request get a 404. `/privacy`,
+    `/terms` (with "Subscriptions, cancellation and refunds") and `/contact` answer 200 with
+    `[set SUPPORT_EMAIL]` placeholders, and they, `/` and `/login` link to all three.
+15. **Screenshots** (1440x900, plus a 390x844 landing page and `/setup`) with a health check on each page:
     status < 400, our stylesheet loaded, no error screen, no browser errors.
-15. **Security.** `/api/mcp` without a token → 401 with
+16. **Security.** `/api/mcp` without a token → 401 with
     `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp"`
     (followed: `resource` and `authorization_servers` match); AS metadata has S256 and a
     registration endpoint; the consent and approval pages carry `X-Frame-Options: DENY`,
     `frame-ancestors 'none'` and `no-referrer` while `/api/mcp` is untouched; a made-up token →
     `invalid_token`; reusing a rotated refresh token → `invalid_grant` and the whole token family
     is revoked (the current access token stops working).
-16. The worker reports no dead jobs and the web log has no errors.
+17. The worker reports no dead jobs and the web log has no errors.
 
 ## Screenshots (`docs/screenshots`, about 1.9 MB)
 

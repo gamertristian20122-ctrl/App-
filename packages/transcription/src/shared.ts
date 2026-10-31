@@ -6,7 +6,7 @@ import { stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { z } from 'zod'
 import { isAppError } from '@app/core/errors'
-import type { TranscriptResult } from '@app/core/ports'
+import type { HealthCheckResult, TranscriptResult } from '@app/core/ports'
 import { safeEngineMessage, transcriptionError } from './errors'
 
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>
@@ -232,3 +232,22 @@ export interface DetailedTranscription {
   result: TranscriptResult
   attempts: TranscriptionAttempt[]
 }
+
+/** How long a health check waits for an engine. */
+export const HEALTH_CHECK_TIMEOUT_MS = 8_000
+
+/**
+ * One GET for a health check: the HTTP status, or null when the server could not be reached
+ * (network error or timeout). Never throws; the response body is discarded unread.
+ */
+export async function probeStatus(fetchFn: FetchLike, url: string, headers: Record<string, string>, timeoutMs = HEALTH_CHECK_TIMEOUT_MS): Promise<number | null> {
+  try {
+    const res = await fetchFn(url, { method: 'GET', headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'manual' })
+    await res.body?.cancel().catch(() => {})
+    return res.status
+  } catch {
+    return null
+  }
+}
+
+export type { HealthCheckResult }

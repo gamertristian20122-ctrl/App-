@@ -1,6 +1,7 @@
 import type { Db } from '../types'
 import * as accounts from './accounts'
 import * as analytics from './analytics'
+import * as appSettings from './appSettings'
 import * as approvalNonces from './approvalNonces'
 import * as audit from './audit'
 import * as brands from './brands'
@@ -17,10 +18,12 @@ import * as transcripts from './transcripts'
 import * as usage from './usage'
 import * as users from './users'
 import * as voice from './voice'
+import * as workerHeartbeats from './workerHeartbeats'
 
 export {
   accounts,
   analytics,
+  appSettings,
   approvalNonces,
   audit,
   brands,
@@ -37,12 +40,14 @@ export {
   usage,
   users,
   voice,
+  workerHeartbeats,
 }
 
 /** Every repository namespace. Functions take (db, ...args). */
 export const repos = {
   accounts,
   analytics,
+  appSettings,
   approvalNonces,
   audit,
   brands,
@@ -59,6 +64,7 @@ export const repos = {
   usage,
   users,
   voice,
+  workerHeartbeats,
 }
 
 type BoundModule<M> = {

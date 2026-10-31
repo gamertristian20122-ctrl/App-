@@ -20,6 +20,8 @@ export const RATE_LIMITS = {
   magicLink: { limit: 5, windowMs: 60_000 },
   /** POST /api/auth/dev-login per IP. */
   devLogin: { limit: 30, windowMs: 60_000 },
+  /** /setup actions per owner (each may call Stripe or R2 several times). */
+  setupAction: { limit: 6, windowMs: 60_000 },
 } as const
 
 export type RateLimitName = keyof typeof RATE_LIMITS

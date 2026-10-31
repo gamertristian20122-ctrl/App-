@@ -23,7 +23,8 @@ export interface StripeApi {
   /** Price ids for lookup keys (active prices only); missing keys are absent from the map. */
   pricesByLookupKey(lookupKeys: string[]): Promise<Map<string, string>>
   createCheckoutSession(input: CheckoutSessionInput): Promise<{ id: string; url: string | null }>
-  createPortalSession(input: { customer: string; returnUrl: string }): Promise<{ url: string }>
+  /** `configuration`: the portal configuration /setup created (else Stripe's default one). */
+  createPortalSession(input: { customer: string; returnUrl: string; configuration?: string }): Promise<{ url: string }>
   /** The latest subscription object (order-independent webhook processing). */
   retrieveSubscription(id: string): Promise<unknown>
 }
@@ -53,7 +54,11 @@ export function createStripeApi(secretKey: string): StripeApi {
       return { id: session.id, url: session.url }
     },
     async createPortalSession(input) {
-      const session = await client.billingPortal.sessions.create({ customer: input.customer, return_url: input.returnUrl })
+      const session = await client.billingPortal.sessions.create({
+        customer: input.customer,
+        return_url: input.returnUrl,
+        ...(input.configuration ? { configuration: input.configuration } : {}),
+      })
       return { url: session.url }
     },
     async retrieveSubscription(id) {

@@ -3,7 +3,7 @@
 
 import { AppError, isAppError } from '@app/core/errors'
 import type { Logger } from '@app/core/log'
-import type { TranscriptResult, Transcriber } from '@app/core/ports'
+import type { HealthCheckResult, TranscriptResult, Transcriber } from '@app/core/ports'
 import { shouldFallBack, transcriptionErrorReason } from './errors'
 import type { DetailedTranscriber, DetailedTranscription, TranscribeInput, TranscriptionAttempt } from './shared'
 
@@ -31,6 +31,15 @@ export class FallbackTranscriber implements Transcriber, DetailedTranscriber {
 
   async transcribe(input: TranscribeInput): Promise<TranscriptResult> {
     return (await this.transcribeDetailed(input)).result
+  }
+
+  /** Every engine's health check; ok only when all of them are (a broken first engine still costs time). */
+  async healthCheck(): Promise<HealthCheckResult> {
+    const results = await Promise.all(this.engines.map((e) => engineHealth(e)))
+    return {
+      ok: results.every((r) => r.ok),
+      detail: results.map((r) => `${engineLabelFor(r.engine)}: ${r.detail ?? (r.ok ? 'OK' : 'not OK')}`).join(' '),
+    }
   }
 
   async transcribeDetailed(input: TranscribeInput): Promise<DetailedTranscription> {
@@ -101,4 +110,22 @@ export async function transcribeWithEngine(transcriber: Transcriber, input: Tran
   const result = await transcriber.transcribe(input)
   const engine = transcriber.name
   return { engine, result, attempts: [{ engine, ok: true, ms: Date.now() - started }] }
+}
+
+/** One engine's health (engines without a healthCheck count as healthy). Never throws. */
+export interface EngineHealth extends HealthCheckResult {
+  engine: string
+}
+
+export async function engineHealth(engine: Transcriber): Promise<EngineHealth> {
+  if (typeof engine.healthCheck !== 'function') return { engine: engine.name, ok: true, detail: 'No health check available.' }
+  try {
+    return { engine: engine.name, ...(await engine.healthCheck()) }
+  } catch {
+    return { engine: engine.name, ok: false, detail: 'The health check failed unexpectedly.' }
+  }
+}
+
+function engineLabelFor(engine: string): string {
+  return engine === 'assemblyai' ? 'AssemblyAI' : engine === 'whisper' ? 'Whisper' : engine
 }

@@ -9,7 +9,11 @@ queue, scheduling, and connecting Claude or ChatGPT to create drafts and approve
 
 What does not work yet: scheduled posts stay "scheduled" (publishing runs on the Railway worker),
 video uploads and clips (need Cloudflare R2 and the worker), and billing (needs Stripe). Those come
-in the full setup in [DEPLOY.md](DEPLOY.md).
+in the real launch: [LAUNCH-ON-PHONE.md](LAUNCH-ON-PHONE.md) (also phone only) or
+[DEPLOY.md](DEPLOY.md).
+
+Tip: add `OWNER_EMAIL=` with the email you sign in with to the block below, and you can open
+`/setup` on your site: a checklist of every service (here most show TEST MODE or "Not set").
 
 ## 1. Supabase (database and sign-in), about 10 minutes
 

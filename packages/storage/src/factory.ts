@@ -7,13 +7,14 @@ import { storageError } from './errors'
 import { LocalStorageBase } from './local/base'
 import { FsStorage } from './local/fs'
 import { MemoryStorage } from './local/memory'
+import type { BucketAdmin } from './bucket'
 import type { MultipartStorage } from './multipart'
 import { R2Storage, type S3Like } from './r2'
 
 export type StorageDriverName = 'r2' | 'fs' | 'memory'
 
 /** What every driver in this package provides. */
-export type AppStorage = ObjectStorage & MultipartStorage & { readonly driver: StorageDriverName }
+export type AppStorage = ObjectStorage & MultipartStorage & BucketAdmin & { readonly driver: StorageDriverName }
 
 /** Path of the web route that serves the local drivers' signed URLs. */
 export const DEV_STORAGE_PATH = '/api/dev-storage'

@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { fromZodError } from '@app/core/errors'
-import type { Clock, PastPostInput, PostingProvider, ProviderAccount, PublishInput, PublishStatus } from '@app/core/ports'
+import type { Clock, HealthCheckResult, PastPostInput, PostingProvider, ProviderAccount, PublishInput, PublishStatus } from '@app/core/ports'
 import { PLATFORM_LABELS, PLATFORMS, PlatformSchema, type AccountStatus, type Metrics, type Platform } from '@app/core/types'
 import { providerError } from '../errors'
 import { ProfileRefSchema, RedirectUrlSchema, RequestIdSchema, parsePublishInput } from '../publish-input'
@@ -229,6 +229,16 @@ export class FakePostingProvider implements PostingProvider {
   }
 
   // --- PostingProvider ------------------------------------------------------------
+
+  /** Always healthy unless scripted with failNext('healthCheck'); never throws (like the real adapter). */
+  async healthCheck(): Promise<HealthCheckResult> {
+    try {
+      this.enter('healthCheck', undefined)
+    } catch {
+      return { ok: false, detail: 'The fake posting service is unavailable.' }
+    }
+    return { ok: true, detail: 'Test mode: the fake posting service is in use, so posts are not really published.' }
+  }
 
   async ensureProfile(i: { brandId: string; profileRef?: string | null; displayName: string }): Promise<{ profileRef: string }> {
     this.enter('ensureProfile', i)

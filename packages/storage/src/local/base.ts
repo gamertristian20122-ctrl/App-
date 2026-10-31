@@ -2,6 +2,7 @@
 // multipart rules, so both behave like R2 from the caller's point of view.
 
 import type { Clock, ObjectHead, ObjectStorage, PresignedPut } from '@app/core/ports'
+import { checkCorsRules, type BucketAdmin, type CorsRule } from '../bucket'
 import { storageError } from '../errors'
 import {
   checkCompletedParts,
@@ -56,9 +57,11 @@ export interface StoredPart {
   etag: string
 }
 
-export abstract class LocalStorageBase implements ObjectStorage, MultipartStorage, LocalBackend {
+export abstract class LocalStorageBase implements ObjectStorage, MultipartStorage, LocalBackend, BucketAdmin {
   abstract readonly driver: 'fs' | 'memory'
   readonly signer: LocalUrlSigner
+  /** Local drivers serve their own signed URLs (same origin), so CORS is only recorded for /setup. */
+  private corsRules: CorsRule[] = []
   protected readonly putTtlSec: number
   protected readonly minPartBytes: number
 
@@ -69,6 +72,18 @@ export abstract class LocalStorageBase implements ObjectStorage, MultipartStorag
     if (!Number.isSafeInteger(this.minPartBytes) || this.minPartBytes < 1) {
       throw storageError('invalid_input', 'minPartBytes must be a positive integer.')
     }
+  }
+
+  // --- bucket checks (/setup) ----------------------------------------------------
+
+  async headBucket(): Promise<void> {}
+
+  async getBucketCors(): Promise<CorsRule[]> {
+    return this.corsRules.map((r) => ({ ...r }))
+  }
+
+  async putBucketCors(rules: CorsRule[]): Promise<void> {
+    this.corsRules = checkCorsRules(rules)
   }
 
   // --- ObjectStorage ----------------------------------------------------------

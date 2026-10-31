@@ -6,6 +6,7 @@ import type { EnvSource } from '@app/core'
 import { createWorkerContext, type CreateWorkerContextOptions, type FullWorkerContext } from './context'
 import { safeErrorMessage } from './errors'
 import { startHealthServer, type HealthServer } from './health'
+import { Heartbeat, workerVersion } from './heartbeat'
 import { mediaHandlers } from './media'
 import { postingHandlers } from './posting'
 import { createServicesQueue, type JobQueue } from './queue'
@@ -40,6 +41,8 @@ export interface StartWorkerOptions extends CreateWorkerContextOptions {
   scheduler?: Partial<Omit<SchedulerOptions, 'services' | 'clock' | 'logger'>> | false
   /** Health port; default config.PORT (none when unset). null disables it. */
   healthPort?: number | null
+  /** Heartbeat for /setup (worker_heartbeats); false disables it. Default: every 60 s. */
+  heartbeat?: { intervalMs?: number } | false
 }
 
 export interface WorkerHandle {
@@ -48,12 +51,22 @@ export interface WorkerHandle {
   runner: Runner
   scheduler: Scheduler | null
   health: HealthServer | null
+  heartbeat: Heartbeat | null
   /** Graceful stop: scheduler, runner (finish or release jobs), health server, database. Idempotent. */
   stop(): Promise<void>
 }
 
 export async function startWorker(env: EnvSource = process.env, options: StartWorkerOptions = {}): Promise<WorkerHandle> {
-  const { context: given, handlerSets, queue: givenQueue, runner: runnerOptions, scheduler: schedulerOptions, healthPort, ...contextOptions } = options
+  const {
+    context: given,
+    handlerSets,
+    queue: givenQueue,
+    runner: runnerOptions,
+    scheduler: schedulerOptions,
+    healthPort,
+    heartbeat: heartbeatOptions,
+    ...contextOptions
+  } = options
   const context = given ?? (await createWorkerContext(env, contextOptions))
   const { config, logger } = context
   const groups = config.WORKER_TYPES
@@ -74,13 +87,27 @@ export async function startWorker(env: EnvSource = process.env, options: StartWo
       ? new Scheduler({ services: context.services, clock: context.clock, logger, ...(schedulerOptions ?? {}) })
       : null
 
+  const heartbeat =
+    heartbeatOptions === false
+      ? null
+      : new Heartbeat({
+          db: context.db,
+          workerId: context.workerId,
+          groups,
+          version: workerVersion(env),
+          logger,
+          ...(heartbeatOptions?.intervalMs ? { intervalMs: heartbeatOptions.intervalMs } : {}),
+        })
+
   await runner.start()
   scheduler?.start()
+  heartbeat?.start()
   const port = healthPort === undefined ? (config.PORT ?? null) : healthPort
   let health: HealthServer | null = null
   try {
     health = port === null ? null : await startHealthServer({ port, status: () => runner.status() })
   } catch (error) {
+    await heartbeat?.stop()
     await scheduler?.stop()
     await runner.stop()
     throw error
@@ -94,6 +121,8 @@ export async function startWorker(env: EnvSource = process.env, options: StartWo
         await scheduler?.stop()
         await runner.stop()
       } finally {
+        // keeps beating while jobs drain, then removes this worker's row
+        await heartbeat?.stop()
         await health?.close().catch((error: unknown) => logger.warn('closing the health server failed', { error: safeErrorMessage(error) }))
         if (!given) await context.close()
         logger.info('worker stopped')
@@ -101,5 +130,5 @@ export async function startWorker(env: EnvSource = process.env, options: StartWo
     })()
     return stopping
   }
-  return { context, registry, runner, scheduler, health, stop }
+  return { context, registry, runner, scheduler, health, heartbeat, stop }
 }

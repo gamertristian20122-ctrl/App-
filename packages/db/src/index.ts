@@ -4,7 +4,18 @@
 export type { Db, DbDriver, Row } from './types'
 export { createPostgresDb, type PostgresDbOptions } from './postgres'
 export { createPgliteDb, wrapPglite } from './pglite'
-export { migrate, readMigrations, findMigrationsDir, type MigrationFile, type MigrateResult, type MigrateOptions } from './migrate'
+export {
+  migrate,
+  readMigrations,
+  findMigrationsDir,
+  appliedMigrationNames,
+  migrationStatus,
+  type MigrationFile,
+  type MigrateResult,
+  type MigrateOptions,
+  type MigrationStatus,
+} from './migrate'
+export { MIGRATION_NAMES } from './migration-names'
 export { installSupabaseShim, SUPABASE_SHIM_SQL } from './supabase-shim'
 export { openDb, type OpenDbOptions } from './open'
 export {
@@ -57,4 +68,6 @@ export type {
 export type { ApprovalNonceRow, ApprovalNonceChannel } from './repos/approvalNonces'
 export type { StripeEventRow } from './repos/stripeEvents'
 export type { AuditRow, AuditInput, ListAuditOptions } from './repos/audit'
+export type { AppSettingRow } from './repos/appSettings'
+export type { BeatInput, HeartbeatRow, WorkerGroupName } from './repos/workerHeartbeats'
 export type { BrandWithAccounts, OrphanedReservation } from './repos/maintenance'

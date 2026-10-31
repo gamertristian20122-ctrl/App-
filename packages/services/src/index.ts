@@ -53,7 +53,7 @@ export {
 } from './billing'
 export type { AuditEvent } from './audit'
 export type { CleanupResult } from './maintenance'
-export { createServicesFromEnv, type ServicesFromEnv, type ServicesFromEnvOptions } from './wiring'
+export { createServicesFromEnv, transcriptionHealthFromConfig, type EngineHealth, type ServicesFromEnv, type ServicesFromEnvOptions } from './wiring'
 export {
   checkRedirectUri,
   oauthErrorCode,

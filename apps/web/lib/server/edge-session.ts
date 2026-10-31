@@ -26,9 +26,12 @@ export function shouldSkip(pathname: string): boolean {
   return SKIP_PREFIXES.some((p) => pathname.startsWith(p))
 }
 
-/** Pages that carry one-time tokens or grant access: never framed, never send a Referer. */
+/**
+ * Pages that carry one-time tokens, grant access or change the deployment (the owner's /setup):
+ * never framed, never send a Referer.
+ */
 export function isSensitivePage(pathname: string): boolean {
-  return pathname === '/oauth/authorize' || pathname.startsWith('/approve/')
+  return pathname === '/oauth/authorize' || pathname.startsWith('/approve/') || pathname === '/setup' || pathname.startsWith('/setup/')
 }
 
 const SECURITY_HEADERS: Record<string, string> = {

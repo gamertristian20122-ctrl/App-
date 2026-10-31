@@ -35,7 +35,7 @@ Starter trial with 1 clipping hour (no card). Limits are enforced in code
 
 Everything in the v1 plan (`CLAUDE.md`, build order steps 1–8) is written and tested:
 
-- **Database:** 20 tables in Supabase Postgres (`supabase/migrations`), row-level security on every
+- **Database:** 22 tables in Supabase Postgres (`supabase/migrations`), row-level security on every
   table, approval rules enforced by the database itself.
 - **MCP server** at `/api/mcp` (Streamable HTTP, OAuth 2.1 with dynamic client registration):
   17 tools (`connect_account`, `list_accounts`, `create_draft`, `list_drafts`, `approve_draft`,
@@ -53,18 +53,27 @@ Everything in the v1 plan (`CLAUDE.md`, build order steps 1–8) is written and 
 - **Web app** (Next.js): landing page with pricing, magic-link sign-in, dashboard (overview,
   approvals, calendar, brands, accounts, media, clips, voice, analytics, billing, connect your AI),
   OAuth consent page, one-click web approval, Stripe Checkout and customer portal, webhooks,
-  daily crons.
+  daily crons, and the legal pages (`/privacy`, `/terms` with subscriptions, cancellation and
+  refunds, `/contact`) linked from every footer.
+- **Launch setup** at `/setup` (only for `OWNER_EMAIL`; everyone else gets a 404): a phone-friendly
+  checklist of every service (database and migrations, Supabase sign-in, R2 bucket and CORS,
+  Upload-Post key, Stripe key, prices, webhook and portal, transcription, worker heartbeats, legal
+  pages, the MCP URL) with OK / Needs attention / Not set and where to tap to fix it, plus one-tap
+  fixes: **Fix storage CORS**, **Create missing products and prices**, **Create webhook endpoint**
+  (the signing secret is stored encrypted) and **Set up billing portal**. Secret values are never
+  shown.
 - **Worker** (Railway): publishing, status checks, analytics, imports, clean-up, and the media
   jobs (ingest, URL imports, transcription, clip rendering with ffmpeg, carousel, template-video
   and HTML code-video rendering with Chromium).
-- **Tests:** 1,334 unit and integration tests, a real-Postgres suite, and an end-to-end run
+- **Tests:** 1,457 unit and integration tests, a real-Postgres suite, and an end-to-end run
   (`pnpm e2e`) that drives the whole product with a real MCP client and a real browser.
 
 **Not done yet:** nothing has run against the live services (Supabase, Stripe, Upload-Post,
 Cloudflare R2, Whisper/AssemblyAI) or a real Claude / ChatGPT / Cursor account, and the worker's
 Docker image has been built and started locally but not yet on Railway. Those need your accounts
-and keys: follow
-[docs/DEPLOY.md](docs/DEPLOY.md), then [docs/LAUNCH-CHECKLIST.md](docs/LAUNCH-CHECKLIST.md).
+and keys: follow [docs/LAUNCH-ON-PHONE.md](docs/LAUNCH-ON-PHONE.md) (phone only, tap by tap) or
+[docs/DEPLOY.md](docs/DEPLOY.md) (the full reference), then open `/setup` and
+[docs/LAUNCH-CHECKLIST.md](docs/LAUNCH-CHECKLIST.md).
 
 ## Repo map
 
@@ -127,7 +136,9 @@ pnpm -F @app/web dev
 
 Open http://localhost:3000/login and use **Development sign-in** with any email. You can create brands, connect
 (fake) accounts, write and approve drafts, and schedule posts. Scheduled posts are published by
-the worker, so they wait until you run it (next step).
+the worker, so they wait until you run it (next step). To see the launch checklist, also set
+`OWNER_EMAIL` to the email you sign in with and open http://localhost:3000/setup (it shows the
+fake services as TEST MODE).
 
 ### 3. Run the web app and the worker together
 
@@ -140,7 +151,7 @@ then create the tables:
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres pnpm -F @app/db migrate --local-shim
 ```
 
-It prints `applied 3, already applied 0` (and `applied 0, ...` on later runs). `--local-shim`
+It prints `applied 5, already applied 0` (and `applied 0, ...` on later runs). `--local-shim`
 adds the few Supabase pieces a plain Postgres lacks (the `auth` schema and roles). Never use it
 against Supabase. Use your own user name and password in the URL if they differ.
 
@@ -203,7 +214,8 @@ the web build on every push and pull request.
 
 | Doc | What's in it |
 | --- | --- |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | Step-by-step deploy: Supabase, R2, Upload-Post, Stripe, Whisper, Vercel, Railway, domain, connecting Claude / ChatGPT / Cursor, smoke tests |
+| [docs/LAUNCH-ON-PHONE.md](docs/LAUNCH-ON-PHONE.md) | Go live from a phone: each service in order, what to tap and copy, one paste block for Vercel and one for Railway, then `/setup` and Stripe live mode |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Step-by-step deploy: Supabase, R2, Upload-Post, Stripe, AssemblyAI (Whisper later), Vercel, Railway, domain, `/setup`, connecting Claude / ChatGPT / Cursor, smoke tests |
 | [docs/LAUNCH-CHECKLIST.md](docs/LAUNCH-CHECKLIST.md) | What still needs a human (accounts, legal pages, tax) and every product decision that was defaulted |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The v1 build contract: data model, plans, platform rules, interfaces, MCP surface |
 | [docs/E2E.md](docs/E2E.md) | The end-to-end run and the bugs it found |

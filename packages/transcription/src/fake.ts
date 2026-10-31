@@ -4,7 +4,7 @@
 // `requireFile` is set.
 
 import { stat } from 'node:fs/promises'
-import type { TranscriptResult, Transcriber } from '@app/core/ports'
+import type { HealthCheckResult, TranscriptResult, Transcriber } from '@app/core/ports'
 import type { TimedText } from '@app/core/types'
 import { transcriptionError } from './errors'
 import { normalizeTranscript } from './normalize'
@@ -89,6 +89,12 @@ export class FakeTranscriber implements Transcriber {
     for (let i = 0; i < times; i++) {
       this.failures.push(error ?? transcriptionError('engine_unavailable', `${this.name} is unavailable (scripted).`, { engine: this.name }))
     }
+  }
+
+  /** Healthy unless a failure is scripted (failNext), which it reports without consuming it. */
+  async healthCheck(): Promise<HealthCheckResult> {
+    if (this.failures.length > 0) return { ok: false, detail: `${this.name} is unavailable (scripted).` }
+    return { ok: true, detail: 'Test mode: fake transcripts (no real speech-to-text).' }
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscriptResult> {

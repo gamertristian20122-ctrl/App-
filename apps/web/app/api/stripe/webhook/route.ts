@@ -1,10 +1,12 @@
-// Stripe webhooks: verify the signature on the raw body (STRIPE_WEBHOOK_SECRET), then
+// Stripe webhooks: verify the signature on the raw body (STRIPE_WEBHOOK_SECRET from the
+// environment, else the signing secret /setup stored when it created the endpoint), then
 // services.billing.applyStripeEvent (idempotent via stripe_events; re-reads the subscription
 // from Stripe when an API key is configured, so event order does not matter).
 // 2xx for processed / ignored / duplicate; non-2xx for unmatched and failures so Stripe retries.
 
 import { getRuntime } from '@/lib/server/deps'
 import { errorJson, json, readBodyText, tooLarge, unavailable } from '@/lib/server/http'
+import { stripeWebhookSecret } from '@/lib/server/settings'
 import { getStripe, verifyStripeWebhook } from '@/lib/server/stripe'
 
 export const runtime = 'nodejs'
@@ -20,8 +22,9 @@ export async function POST(req: Request): Promise<Response> {
     return unavailable()
   }
   const { services, config, log } = rt
-  const secret = config.STRIPE_WEBHOOK_SECRET
-  if (!secret) return errorJson(503, 'unavailable', 'Stripe webhooks are not configured.')
+  const found = await stripeWebhookSecret(rt.db, config)
+  if (!found) return errorJson(503, 'unavailable', 'Stripe webhooks are not configured.')
+  const secret = found.secret
 
   const signature = req.headers.get('stripe-signature')
   if (!signature || signature.length > 4096) return errorJson(400, 'bad_request', 'Missing Stripe signature.')

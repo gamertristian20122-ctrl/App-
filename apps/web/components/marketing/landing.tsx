@@ -5,6 +5,7 @@ import Link from 'next/link'
 import type { ReactNode } from 'react'
 import { PLANS, TRIAL, formatCents } from '@app/core/plans'
 import { PLATFORMS, PLATFORM_LABELS } from '@app/core/types'
+import { LegalLinks } from '@/components/legal/legal-links'
 import { PlatformMark } from '@/components/platform/platform-badge'
 import { Logo } from '@/components/ui/logo'
 import { button, cx } from '@/components/ui/styles'
@@ -317,6 +318,7 @@ export function SiteFooter({ year }: { year: number }) {
             Sign in
           </Link>
         </nav>
+        <LegalLinks />
       </div>
     </footer>
   )

@@ -25,8 +25,11 @@ import {
   CopyObjectCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  GetBucketCorsCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
+  PutBucketCorsCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
@@ -35,6 +38,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import type { Logger } from '@app/core/log'
 import type { ObjectHead, ObjectStorage, PresignedPut } from '@app/core/ports'
+import { checkCorsRules, type BucketAdmin, type CorsRule } from './bucket'
 import { storageError } from './errors'
 import {
   checkCompletedParts,
@@ -166,7 +170,7 @@ function toNodeReadable(body: unknown): Readable {
   throw storageError('storage_unavailable', 'Storage returned an unreadable response.')
 }
 
-export class R2Storage implements ObjectStorage, MultipartStorage {
+export class R2Storage implements ObjectStorage, MultipartStorage, BucketAdmin {
   readonly driver = 'r2' as const
   readonly bucket: string
   private readonly client: S3Like
@@ -399,6 +403,53 @@ export class R2Storage implements ObjectStorage, MultipartStorage {
       await this.abortMultipartUpload(to, uploadId).catch(() => undefined)
       throw err
     }
+  }
+
+  // --- bucket checks (/setup) -------------------------------------------------------
+  // A bucket-scoped "Object Read & Write" R2 token may be refused the CORS calls (they need
+  // "Admin Read & Write"); callers report that as storage_auth and show the manual steps.
+
+  async headBucket(): Promise<void> {
+    await this.send(new HeadBucketCommand({ Bucket: this.bucket }), 'Bucket')
+  }
+
+  async getBucketCors(): Promise<CorsRule[]> {
+    let out: { CORSRules?: Array<Record<string, unknown>> }
+    try {
+      out = (await this.client.send(new GetBucketCorsCommand({ Bucket: this.bucket }))) as typeof out
+    } catch (err) {
+      const e = (err ?? {}) as S3ErrorShape
+      const name = typeof e.name === 'string' ? e.name : typeof e.Code === 'string' ? e.Code : ''
+      if (name === 'NoSuchCORSConfiguration') return []
+      throw mapS3Error(err, 'Bucket CORS')
+    }
+    const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+    return (out?.CORSRules ?? []).map((r) => ({
+      allowedOrigins: strings(r.AllowedOrigins),
+      allowedMethods: strings(r.AllowedMethods),
+      allowedHeaders: strings(r.AllowedHeaders),
+      exposeHeaders: strings(r.ExposeHeaders),
+      ...(typeof r.MaxAgeSeconds === 'number' ? { maxAgeSeconds: r.MaxAgeSeconds } : {}),
+    }))
+  }
+
+  async putBucketCors(rules: CorsRule[]): Promise<void> {
+    const checked = checkCorsRules(rules)
+    await this.send(
+      new PutBucketCorsCommand({
+        Bucket: this.bucket,
+        CORSConfiguration: {
+          CORSRules: checked.map((r) => ({
+            AllowedOrigins: r.allowedOrigins,
+            AllowedMethods: r.allowedMethods,
+            AllowedHeaders: r.allowedHeaders,
+            ExposeHeaders: r.exposeHeaders,
+            ...(r.maxAgeSeconds !== undefined ? { MaxAgeSeconds: r.maxAgeSeconds } : {}),
+          })),
+        },
+      }),
+      'Bucket CORS',
+    )
   }
 
   // --- multipart --------------------------------------------------------------------

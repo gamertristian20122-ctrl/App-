@@ -11,6 +11,20 @@ import type {
 } from './types'
 
 // ---------------------------------------------------------------------------
+// Health checks (the owner's /setup page)
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of a cheap, authenticated "are the credentials good and is the service reachable" call.
+ * `detail` is one plain-English sentence for the owner; it never contains secrets.
+ * Health checks never throw: failures come back as `ok: false`.
+ */
+export interface HealthCheckResult {
+  ok: boolean
+  detail?: string
+}
+
+// ---------------------------------------------------------------------------
 // Posting (Upload-Post today; direct platform adapters later)
 // ---------------------------------------------------------------------------
 
@@ -90,6 +104,8 @@ export interface PostingProvider {
     cursor?: string
     limit?: number
   }): Promise<{ posts: PastPostInput[]; nextCursor?: string }>
+  /** Optional: the cheapest authenticated read (API key valid, service reachable). Never throws. */
+  healthCheck?(): Promise<HealthCheckResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +155,8 @@ export interface TranscriptResult {
 export interface Transcriber {
   readonly name: string
   transcribe(i: { filePath: string; language?: string }): Promise<TranscriptResult>
+  /** Optional: the cheapest authenticated call (key valid / server reachable). Never throws. */
+  healthCheck?(): Promise<HealthCheckResult>
 }
 
 // ---------------------------------------------------------------------------

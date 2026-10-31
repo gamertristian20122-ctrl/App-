@@ -10,7 +10,7 @@ import { systemClock } from '@app/core/time'
 import { openDb, type Db } from '@app/db'
 import { createPostingProviderFromConfig } from '@app/posting'
 import { createStorageFromConfig } from '@app/storage'
-import { createTranscriberFromConfig } from '@app/transcription'
+import { checkTranscriptionHealth, createTranscriberFromConfig, type EngineHealth } from '@app/transcription'
 import { servicesConfigFromAppConfig } from './config'
 import { createServices, type Services } from './services'
 
@@ -113,3 +113,13 @@ export async function createServicesFromEnv(
     close: () => (options.db ? Promise.resolve() : db.close()),
   }
 }
+
+/**
+ * Health of the transcription engines TRANSCRIPTION_PROVIDER selects (the owner's /setup page;
+ * the web app builds no transcriber itself). One cheap authenticated call per engine; never throws.
+ */
+export function transcriptionHealthFromConfig(config: Config, options: { fetch?: FetchFn } = {}): Promise<EngineHealth[]> {
+  return checkTranscriptionHealth(config, options.fetch ? { fetch: options.fetch } : {})
+}
+
+export type { EngineHealth }

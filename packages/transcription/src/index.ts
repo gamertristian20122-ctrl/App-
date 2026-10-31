@@ -6,6 +6,8 @@ export * from './errors'
 export * from './normalize'
 export {
   audioContentType,
+  HEALTH_CHECK_TIMEOUT_MS,
+  type HealthCheckResult,
   type DetailedTranscriber,
   type DetailedTranscription,
   type FetchLike,
@@ -19,6 +21,6 @@ export { AssemblyAITranscriber, AssemblyAITranscriptSchema, ASSEMBLYAI_DEFAULT_B
 export type { AssemblyAIOptions } from './assemblyai'
 export { FakeTranscriber, fakeWords, FAKE_TRANSCRIPT_TEXT } from './fake'
 export type { FakeTranscriberOptions } from './fake'
-export { FallbackTranscriber, createFallbackTranscriber, transcribeWithEngine } from './fallback'
-export type { FallbackOptions } from './fallback'
+export { FallbackTranscriber, createFallbackTranscriber, engineHealth, transcribeWithEngine } from './fallback'
+export type { EngineHealth, FallbackOptions } from './fallback'
 export * from './factory'

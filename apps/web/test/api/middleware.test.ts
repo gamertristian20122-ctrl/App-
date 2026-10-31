@@ -46,8 +46,8 @@ describe('middleware', () => {
     expect(pattern.test('/oauth/authorize')).toBe(true)
   })
 
-  it('adds anti-framing and no-referrer headers to the consent and approval pages', async () => {
-    for (const path of ['/oauth/authorize?client_id=x', '/approve/abcdef']) {
+  it('adds anti-framing and no-referrer headers to the consent, approval and setup pages', async () => {
+    for (const path of ['/oauth/authorize?client_id=x', '/approve/abcdef', '/setup']) {
       const res = await handleEdgeRequest(new NextRequest(`http://localhost:3000${path}`))
       expect(res.headers.get('x-frame-options')).toBe('DENY')
       expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'")

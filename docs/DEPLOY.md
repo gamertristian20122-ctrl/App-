@@ -4,6 +4,17 @@ This takes you from "code on GitHub" to "a customer can sign up, connect Claude 
 publish". Do the steps **in order**: later steps need values from earlier ones. Plan on half a day
 the first time, most of it waiting for accounts, DNS and builds.
 
+**Only have a phone?** Follow [LAUNCH-ON-PHONE.md](LAUNCH-ON-PHONE.md) instead: the same launch,
+in tap-by-tap order, with one copy-paste block per host. This guide is the full reference.
+
+**The `/setup` page.** Once the site is up, sign in with the address in `OWNER_EMAIL` and open
+`https://YOURDOMAIN/setup`. It checks every service below (database and migrations, Supabase sign-in,
+R2 bucket and CORS, Upload-Post key, Stripe key, prices, webhook and portal, transcription, the
+workers' heartbeats, the legal pages) and shows **OK / Needs attention / Not set** with the fix for
+each. Four buttons do the fiddly parts for you: **Fix storage CORS**, **Create missing products and
+prices**, **Create webhook endpoint** and **Set up billing portal**. Secret values are never shown.
+Anyone else gets a 404 there.
+
 What you end up with:
 
 ```
@@ -17,7 +28,7 @@ What you end up with:
                            ▲
                            │  job queue lives in Postgres
    Railway: worker-posting ┤  publish, status, analytics, imports, clean-up ──▶ Upload-Post ──▶ 9 platforms
-   Railway: worker-media ──┘  ingest, transcribe, clip, render ──▶ Whisper (Railway) / AssemblyAI
+   Railway: worker-media ──┘  ingest, transcribe, clip, render ──▶ AssemblyAI (later also Whisper)
                            │
                            ▼
                  Cloudflare R2 (videos and images)
@@ -47,9 +58,9 @@ it. The full list of variables, with where each one goes, is at the end:
 | Cloudflare | R2 file storage | needs a payment method on file |
 | Upload-Post | posting to the 9 platforms, analytics | a paid plan (step 4) |
 | Stripe | subscriptions | start in test mode |
-| AssemblyAI | transcription fallback | pay as you go |
+| AssemblyAI | transcription (Whisper can be added later) | pay as you go |
 | Vercel | web app and MCP server | **Pro plan** before you charge customers (Hobby is for non-commercial use only) |
-| Railway | the two workers (and Whisper) | Hobby to start, Pro for more disk and RAM |
+| Railway | the two workers (and later Whisper) | Hobby to start, Pro for more disk and RAM |
 
 **On your computer**, in a copy of this repository:
 
@@ -118,9 +129,13 @@ DATABASE_URL='postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supab
   pnpm -F @app/db migrate
 ```
 
-Expected output ends with `applied 3, already applied 0`. Running it again prints
-`applied 0, already applied 3`; it is always safe to re-run. In **Table Editor** you should now
-see 20 tables plus `schema_migrations`, each marked "RLS enabled".
+Expected output ends with `applied 5, already applied 0`. Running it again prints
+`applied 0, already applied 5`; it is always safe to re-run. In **Table Editor** you should now
+see 22 tables plus `schema_migrations`, each marked "RLS enabled".
+
+**No computer?** Let Vercel apply them on every deploy instead: set `RUN_MIGRATIONS=1` and
+`MIGRATION_DATABASE_URL` (the **session pooler** string) in Vercel (step 7.2). The build runs the
+same migrator before `next build`; `/setup` says when a migration is missing.
 
 Run this command again whenever a new file appears in `supabase/migrations`, **before** deploying
 the code that needs it.
@@ -166,7 +181,9 @@ empty; it never needs to leave Supabase.
    public access **off**: every file is served through short-lived signed links.
    - Name → `R2_BUCKET`
 3. Bucket → **Settings → CORS policy** → add this policy (it lets the browser upload straight to
-   R2 from your site):
+   R2 from your site). Or skip this and tap **Fix storage CORS** on `/setup` after step 7 (that
+   needs an R2 token allowed to change bucket settings; otherwise `/setup` shows this policy with a
+   copy button so you can paste it here):
 
    ```json
    [
@@ -223,6 +240,11 @@ this step in live mode at launch.
 
 ### 5.1 Products and prices
 
+**Shortcut:** after step 7, the **Create missing products and prices** button on `/setup` creates
+exactly these (monthly, USD, with the lookup keys and the amounts from `packages/core/src/plans.ts`)
+and fixes a wrong amount by moving the lookup key to a correct price. It is safe to tap twice. By
+hand:
+
 **Product catalog → Add product**, five times. Each has **one recurring price, billed monthly, in
 USD**. Under the price's advanced options, set the **lookup key** exactly as shown: the app finds
 prices by lookup key, so you never copy price ids.
@@ -242,6 +264,11 @@ Keep only one active price per lookup key. (If you ever prefer fixed ids, set
 There is no Stripe trial: the 7-day trial runs inside the app and needs no card.
 
 ### 5.2 Customer portal
+
+**Shortcut:** the **Set up billing portal** button on `/setup` creates a portal configuration
+(cancel at the end of the billing period, payment-method updates, invoice history, plan switching
+between Starter, Plus and Pro, your `/privacy` and `/terms` links), and the app uses it for
+"Manage billing". By hand:
 
 **Settings → Billing → Customer portal**:
 
@@ -267,18 +294,22 @@ launch). The webhook secret comes in [step 9](#9-webhooks).
 
 ---
 
-## 6. Transcription: Whisper first, AssemblyAI as fallback
+## 6. Transcription: AssemblyAI to start, self-hosted Whisper later
 
-The media worker transcribes source videos before clipping. With `TRANSCRIPTION_PROVIDER=chain` it
-tries your own Whisper server first and falls back to AssemblyAI automatically.
+The media worker transcribes source videos before clipping.
 
-### 6.1 AssemblyAI (fallback)
+**Recommended for launch: `TRANSCRIPTION_PROVIDER=assemblyai`** (step 6.1 only). No server to run,
+and AssemblyAI charges per hour of audio, which is the cheapest option at low volume. When volume
+grows, add your own Whisper server (step 6.2) and switch to `TRANSCRIPTION_PROVIDER=chain`: it tries
+Whisper first and falls back to AssemblyAI automatically, so a Whisper outage never stops clipping.
+
+### 6.1 AssemblyAI
 
 Sign up, add billing, copy the API key from the dashboard → `ASSEMBLYAI_API_KEY`. (EU data
 residency: also set `ASSEMBLYAI_BASE_URL=https://api.eu.assemblyai.com`.) The app deletes each
 transcript from AssemblyAI right after it gets it back.
 
-### 6.2 Self-hosted Whisper on Railway (primary)
+### 6.2 Self-hosted Whisper on Railway (later, to cut cost)
 
 Any server that offers OpenAI's `/v1/audio/transcriptions` API with `verbose_json` and word
 timestamps works. A good open-source option is **speaches** (faster-whisper behind an
@@ -299,9 +330,10 @@ media worker logs which engine answered. If Whisper fails, AssemblyAI takes over
 working while you fix it. If the worker can't reach Whisper over the private network, check the
 speaches docs for listening on IPv6 (`::`), which Railway's private network may require.
 
-**Simpler start (optional):** skip Whisper and set `TRANSCRIPTION_PROVIDER=assemblyai` on the
-media worker. A Whisper box costs money every hour it runs, while AssemblyAI charges per hour of
-audio, so AssemblyAI alone can be cheaper at low volume. Switch to `chain` when volume grows.
+A Whisper box costs money every hour it runs, while AssemblyAI charges per hour of audio, so start
+with AssemblyAI alone and switch to `chain` when volume grows. `/setup` checks the AssemblyAI key
+(one free authenticated call); it can't reach a Whisper server on Railway's private network from
+Vercel, so for Whisper watch the media worker's logs (they name the engine that answered).
 
 ---
 
@@ -337,14 +369,24 @@ audio, so AssemblyAI alone can be cheaper at low volume. Switch to `chain` when 
 | `STORAGE_DRIVER` | `r2` |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | step 3 |
 | `STRIPE_SECRET_KEY` | step 5.3 |
-| `STRIPE_WEBHOOK_SECRET` | step 9 (add it then and redeploy) |
-| `TRANSCRIPTION_PROVIDER` | `whisper` |
-| `WHISPER_URL` | the same value as the media worker (if you don't run Whisper, any URL such as `https://whisper.invalid/v1`) |
+| `STRIPE_WEBHOOK_SECRET` | optional: only if you create the webhook by hand (step 9.1). The **Create webhook endpoint** button on `/setup` stores the signing secret encrypted in the database instead; a value here always wins. |
+| `TRANSCRIPTION_PROVIDER` | `assemblyai` |
+| `ASSEMBLYAI_API_KEY` | step 6.1 (lets the start-up check pass and `/setup` verify the key) |
+| `OWNER_EMAIL` | the email **you** sign in with: only that account can open `/setup` |
+| `SUPPORT_EMAIL` | the address customers write to (shown on `/contact`, `/privacy`, `/terms`) |
+| `LEGAL_ENTITY_NAME` | your name or company (the legal pages) |
+| `LEGAL_JURISDICTION` | whose law governs the terms, e.g. `the State of Delaware, United States` |
+| `LEGAL_EFFECTIVE_DATE` | when the terms and privacy policy took effect, `YYYY-MM-DD` |
+| `RUN_MIGRATIONS`, `MIGRATION_DATABASE_URL` | optional: `1` and the Supabase **session pooler** string to apply migrations on every deploy (step 2.3) |
 | `ENABLE_EXPERIMENTAL_COREPACK` | `1` (optional: builds with the exact pnpm version from `package.json`) |
 
 Why transcription settings on the web app: the web app never transcribes, but its start-up check
-refuses to run in production without a real engine configured. `whisper` plus a URL satisfies it
-without copying the AssemblyAI key to Vercel.
+refuses to run in production without a real engine configured, and `/setup` checks the key from
+here. (Running Whisper with `chain`? Set `TRANSCRIPTION_PROVIDER=chain`, `WHISPER_URL` and the
+AssemblyAI key here as on the media worker.)
+
+Until the legal values are set, `/privacy`, `/terms` and `/contact` show `[set NAME]` placeholders
+and `/setup` lists what is missing. Have a lawyer read the pages before real customers arrive.
 
 Leave `NODE_ENV` unset (Vercel sets it), `DEV_AUTH` unset (it is refused in production), and
 `MCP_RESOURCE_URL` unset (it defaults to `APP_URL/api/mcp`).
@@ -402,8 +444,9 @@ place.
 1. In the same project: **New → GitHub Repo** → the same repository. Name it `worker-media`.
 2. Same settings as above (root directory empty, config file `apps/worker/railway.toml`).
 3. **Variables**: the shared ones, plus `WORKER_TYPES=media`, `WORKER_CONCURRENCY=1`, `PORT=8080`,
-   and the transcription settings (`TRANSCRIPTION_PROVIDER=chain`, `WHISPER_URL`,
-   `WHISPER_API_KEY`, `WHISPER_MODEL`, `ASSEMBLYAI_API_KEY`).
+   and the transcription settings (`TRANSCRIPTION_PROVIDER=assemblyai` and `ASSEMBLYAI_API_KEY`;
+   with your own Whisper later: `TRANSCRIPTION_PROVIDER=chain`, `WHISPER_URL`, `WHISPER_API_KEY`,
+   `WHISPER_MODEL`).
 4. Resources: at least **2 vCPU and 4 GB RAM** (ffmpeg and Chromium). Raise
    `WORKER_CONCURRENCY` to 2 on 4+ vCPU.
 5. Disk: source videos (up to 10 GB each) are downloaded to `/tmp/worker-media` while they are
@@ -425,11 +468,9 @@ place.
 | `UPLOAD_POST_API_KEY` | step 4 | step 4 |
 | `STORAGE_DRIVER` | `r2` | `r2` |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | step 3 | step 3 |
-| `TRANSCRIPTION_PROVIDER` | `whisper` (start-up check only; this worker never transcribes) | `chain` |
-| `WHISPER_URL` | same as worker-media | `http://whisper.railway.internal:8000/v1` |
-| `WHISPER_API_KEY` | not needed | the `API_KEY` you gave the Whisper service |
-| `WHISPER_MODEL` | not needed | e.g. `Systran/faster-whisper-small` |
-| `ASSEMBLYAI_API_KEY` | not needed | step 6.1 |
+| `TRANSCRIPTION_PROVIDER` | `assemblyai` (start-up check only; this worker never transcribes) | `assemblyai` (or `chain` with Whisper, step 6.2) |
+| `ASSEMBLYAI_API_KEY` | step 6.1 | step 6.1 |
+| `WHISPER_URL`, `WHISPER_API_KEY`, `WHISPER_MODEL` | not needed | only with `chain` (step 6.2) |
 | `WORKER_TYPES` | `posting` | `media` |
 | `WORKER_CONCURRENCY` | `4` | `1` |
 | `PORT` | `8080` | `8080` |
@@ -443,7 +484,8 @@ workers.
 The first build downloads the Playwright base image (about 2 GB), so it takes several minutes.
 When it's up, the logs show `worker started` with the job types it handles, and the service is
 marked healthy (Railway calls `GET /health`). Within a few minutes the posting worker also logs its
-first scheduled `cleanup` job.
+first scheduled `cleanup` job. Each worker records a heartbeat in the database every minute, so
+`/setup` shows "Posting worker / Media worker: last seen N seconds ago" (or "not running").
 
 The image was built and started locally before handover (production settings, health check,
 graceful stop, a Chromium slide render and ffmpeg with captions support all worked), but not yet
@@ -456,6 +498,12 @@ on Railway. If the Railway build fails, its log names the failing line of `apps/
 Now that `https://YOURDOMAIN` is live:
 
 ### 9.1 Stripe
+
+**Shortcut:** tap **Create webhook endpoint** on `/setup`. It creates the endpoint for
+`https://YOURDOMAIN/api/stripe/webhook` with exactly the five events below and stores the signing
+secret encrypted (with `TOKEN_ENCRYPTION_KEYS`) in the database, so you never copy it. The webhook
+route uses `STRIPE_WEBHOOK_SECRET` when it is set, otherwise the stored one, and always verifies the
+signature. Test and live mode each get their own endpoint and secret. By hand:
 
 1. **Developers → Webhooks → Add endpoint** (in newer dashboards: Workbench → Webhooks → Create
    an event destination, "Your account").
@@ -502,6 +550,10 @@ that publishes: posts are real.
 
 **In the browser:**
 
+- [ ] `/setup` (signed in as `OWNER_EMAIL`): nothing left under **Needs attention** or **Not set**
+      except what you chose to leave (for example Whisper).
+- [ ] `/privacy`, `/terms` and `/contact` show your details (no `[set NAME]` placeholders), and
+      every page's footer links to them.
 - [ ] The landing page loads and shows $8 / $15 / $25.
 - [ ] `/login` → enter your email → the email arrives within a minute → open the link in the same
       browser → you land in the dashboard with a trial banner.
@@ -610,9 +662,11 @@ fallback).
 **Deploying changes.** Pushing to the main branch redeploys Vercel and both Railway services. If
 the change adds a file to `supabase/migrations`, run the migration command from step 2.3 first.
 
-**Going live with Stripe.** Switch the dashboard to live mode and redo step 5 (products with the
-same lookup keys, portal settings) and step 9.1 (a live webhook). Replace `STRIPE_SECRET_KEY` and
-`STRIPE_WEBHOOK_SECRET` on Vercel with the live values and redeploy. Accounts you created while
+**Going live with Stripe.** Switch the dashboard to live mode, replace `STRIPE_SECRET_KEY` on
+Vercel with the live key (and remove `STRIPE_WEBHOOK_SECRET` if you set one) and redeploy. Then on
+`/setup` tap **Create missing products and prices**, **Create webhook endpoint** and **Set up
+billing portal** again: they create the live versions (by hand: redo step 5 and step 9.1 in live
+mode). Accounts you created while
 testing still point at test-mode Stripe customers: archive their brands (this frees their
 Upload-Post profiles), then delete those users in Supabase (**Authentication → Users**; their app
 data is deleted with them).
@@ -624,6 +678,7 @@ never contain tokens or keys.
 
 | Symptom | Likely cause and fix |
 | --- | --- |
+| `/setup` answers "page not found" | You are not signed in with the `OWNER_EMAIL` address (or it is misspelled in Vercel). Without `OWNER_EMAIL`, `/setup` only says how to set it. |
 | Error page or worker crash with `Invalid configuration: X is required ...` | A variable is missing or malformed. The message names it (never its value). Fix it, then redeploy. |
 | `schema "auth" not found` when migrating | The URL is not your Supabase database. (For a plain local Postgres, add `--local-shim`.) |
 | Railway workers time out or log `ENETUNREACH` reaching the database | You used the direct connection string. Use the session pooler (port 5432 on `pooler.supabase.com`). |
@@ -657,6 +712,9 @@ Every variable the code reads (`packages/core/src/config.ts`). "—" means not n
 | `SESSION_SECRET` | yes | yes | yes | `pnpm secrets` (same value everywhere) |
 | `TOKEN_ENCRYPTION_KEYS` | yes | yes | yes | `pnpm secrets` (same value everywhere) |
 | `CRON_SECRET` | yes | — | — | `pnpm secrets` |
+| `OWNER_EMAIL` | yes | — | — | your sign-in email: the only account that can open `/setup` |
+| `SUPPORT_EMAIL`, `LEGAL_ENTITY_NAME`, `LEGAL_JURISDICTION`, `LEGAL_EFFECTIVE_DATE` | yes | — | — | the legal and contact pages (step 7.2) |
+| `RUN_MIGRATIONS`, `MIGRATION_DATABASE_URL` | optional | — | — | apply migrations during the Vercel build (step 2.3) |
 | `OAUTH_ACCESS_TOKEN_TTL_SEC`, `OAUTH_REFRESH_TOKEN_TTL_SEC`, `OAUTH_CODE_TTL_SEC`, `APPROVAL_NONCE_TTL_SEC` | optional | — | — | defaults: 1 h, 30 days, 5 min; approval links last at most 24 h |
 | `POSTING_PROVIDER` | `upload_post` | `upload_post` | `upload_post` | fixed (`fake` is refused in production) |
 | `UPLOAD_POST_API_KEY` | yes | yes | yes | Upload-Post dashboard (step 4) |
@@ -667,14 +725,14 @@ Every variable the code reads (`packages/core/src/config.ts`). "—" means not n
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | yes | yes | yes | Cloudflare R2 (step 3) |
 | `R2_ENDPOINT` | EU buckets only | EU buckets only | EU buckets only | `https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com` |
 | `STORAGE_FS_DIR`, `PGLITE_DATA_DIR` | — | — | — | local development only |
-| `TRANSCRIPTION_PROVIDER` | `whisper` | `whisper` | `chain` (or `assemblyai`) | see steps 6 and 7.2 |
-| `WHISPER_URL` | yes (never called) | yes (never called) | yes | `http://whisper.railway.internal:8000/v1` |
+| `TRANSCRIPTION_PROVIDER` | `assemblyai` | `assemblyai` | `assemblyai` (or `chain` with Whisper) | see steps 6 and 7.2 |
+| `ASSEMBLYAI_API_KEY` | yes | yes | yes | AssemblyAI dashboard (step 6.1) |
+| `WHISPER_URL` | only with `chain` | — | only with `chain` | `http://whisper.railway.internal:8000/v1` |
 | `WHISPER_API_KEY` | — | — | if your server has one | the Whisper service's `API_KEY` |
-| `WHISPER_MODEL` | — | — | yes | e.g. `Systran/faster-whisper-small` (default `whisper-1`) |
-| `ASSEMBLYAI_API_KEY` | — | — | yes | AssemblyAI dashboard (step 6.1) |
+| `WHISPER_MODEL` | — | — | with `chain` | e.g. `Systran/faster-whisper-small` (default `whisper-1`) |
 | `ASSEMBLYAI_BASE_URL` | — | — | EU only | `https://api.eu.assemblyai.com` |
 | `STRIPE_SECRET_KEY` | yes | — | — | Stripe → Developers → API keys |
-| `STRIPE_WEBHOOK_SECRET` | yes | — | — | Stripe webhook endpoint (step 9.1) |
+| `STRIPE_WEBHOOK_SECRET` | optional | — | — | Stripe webhook endpoint made by hand (step 9.1); `/setup` stores it otherwise |
 | `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_PRO`, `STRIPE_PRICE_EXTRA_BRAND`, `STRIPE_PRICE_EXTRA_CLIP_HOUR` | optional | — | — | only to pin price ids; lookup keys are used otherwise |
 | `WORKER_TYPES` | — | `posting` | `media` | fixed |
 | `WORKER_CONCURRENCY` | — | `4` | `1` (2 on 4+ vCPU) | |

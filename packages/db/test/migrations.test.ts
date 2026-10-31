@@ -20,7 +20,8 @@ import {
   USAGE_METERS,
 } from '@app/core/types'
 import { createPgliteDb } from '../src/pglite'
-import { findMigrationsDir, migrate, readMigrations } from '../src/migrate'
+import { appliedMigrationNames, findMigrationsDir, migrate, migrationStatus, readMigrations } from '../src/migrate'
+import { MIGRATION_NAMES } from '../src/migration-names'
 import { installSupabaseShim } from '../src/supabase-shim'
 import { createTestDb } from '../src/testing'
 import type { Db } from '../src/types'
@@ -46,6 +47,8 @@ const TABLES = [
   'approval_nonces',
   'stripe_events',
   'audit_log',
+  'app_settings',
+  'worker_heartbeats',
 ]
 
 describe('migrations on a fresh database', () => {
@@ -103,6 +106,25 @@ describe('migrations on a fresh database', () => {
     }
   })
 
+  it('embeds the name of every migration file (the Vercel bundle has no supabase/ folder)', () => {
+    expect([...MIGRATION_NAMES]).toEqual(readMigrations(findMigrationsDir()).map((m) => m.name))
+    expect(MIGRATION_NAMES).toContain('0005_launch_setup')
+  })
+
+  it('reports applied, pending and unknown migrations', async () => {
+    expect(await migrationStatus(db)).toEqual({ pending: [], unknown: [], applied: [...MIGRATION_NAMES] })
+    const status = await migrationStatus(db, [...MIGRATION_NAMES, '0099_future'])
+    expect(status.pending).toEqual(['0099_future'])
+    expect((await migrationStatus(db, MIGRATION_NAMES.slice(0, 4))).unknown).toEqual(['0005_launch_setup'])
+    const empty = await createPgliteDb()
+    try {
+      expect(await appliedMigrationNames(empty)).toEqual([])
+      expect((await migrationStatus(empty)).pending).toEqual([...MIGRATION_NAMES])
+    } finally {
+      await empty.close()
+    }
+  })
+
   it('rejects duplicate versions', () => {
     const dir = mkdtempSync(join(tmpdir(), 'migrations-'))
     try {
@@ -124,7 +146,7 @@ describe('schema shape', () => {
     await db.close()
   })
 
-  it('creates exactly the 20 tables of the data model (plus schema_migrations)', async () => {
+  it('creates exactly the 22 tables of the data model (plus schema_migrations)', async () => {
     const rows = await db.query<{ tablename: string }>(
       `select tablename from pg_tables where schemaname = 'public' order by tablename`,
     )
@@ -174,7 +196,7 @@ describe('schema shape', () => {
     )
     const has = (t: string, c: string) => rows.some((r) => r.table_name === t && r.column_name === c)
     for (const t of TABLES) expect(has(t, 'created_at'), `${t}.created_at`).toBe(true)
-    const mutable = ['users', 'brands', 'connected_accounts', 'media_assets', 'transcripts', 'clips', 'drafts', 'draft_variants', 'posts', 'past_posts', 'jobs']
+    const mutable = ['users', 'brands', 'connected_accounts', 'media_assets', 'transcripts', 'clips', 'drafts', 'draft_variants', 'posts', 'past_posts', 'jobs', 'app_settings']
     for (const t of mutable) expect(has(t, 'updated_at'), `${t}.updated_at`).toBe(true)
     const triggers = await db.query<{ tgname: string }>(
       `select tgname from pg_trigger where tgname like '%_updated_at' and not tgisinternal`,

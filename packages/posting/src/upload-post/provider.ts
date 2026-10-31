@@ -5,10 +5,10 @@
 import { z } from 'zod'
 import { AppError, fromZodError } from '@app/core/errors'
 import type { Logger } from '@app/core/log'
-import type { Clock, PastPostInput, PostingProvider, ProviderAccount, PublishInput, PublishStatus } from '@app/core/ports'
+import type { Clock, HealthCheckResult, PastPostInput, PostingProvider, ProviderAccount, PublishInput, PublishStatus } from '@app/core/ports'
 import { PLATFORM_LABELS, PLATFORMS, PlatformSchema, type Metrics, type Platform } from '@app/core/types'
 import { cleanText } from '@app/core/validation'
-import { providerError } from '../errors'
+import { providerError, providerErrorReason } from '../errors'
 import { ProfileRefSchema, RedirectUrlSchema, RequestIdSchema, parsePublishInput } from '../publish-input'
 import { UploadPostClient, type FetchLike } from './client'
 import {
@@ -195,6 +195,15 @@ const DestinationSchema = z.looseObject({
   name: z.string().nullish(),
 })
 
+/** GET /api/uploadposts/users: the profiles of the account (only counted for the health check). */
+const ProfilesResponseSchema = z.looseObject({
+  profiles: z.array(z.unknown()).nullish(),
+  limit: z.number().int().nonnegative().nullish(),
+})
+
+/** How long the owner's health check waits for Upload-Post. */
+const HEALTH_CHECK_TIMEOUT_MS = 10_000
+
 // --- helpers -------------------------------------------------------------------
 
 /** Display names: one line, ≤ 100 characters (provider limit). */
@@ -272,6 +281,8 @@ export class UploadPostProvider implements PostingProvider {
   readonly name = PROVIDER
   // Private on purpose: nothing outside this adapter may call Upload-Post endpoints directly.
   private readonly client: UploadPostClient
+  /** Same key, shorter timeout, separate rate-limit state: the owner's health check never blocks posting. */
+  private readonly healthClient: UploadPostClient
   private readonly clock: Clock
   private readonly logger: Logger | undefined
   private readonly profilePrefix: string
@@ -296,6 +307,41 @@ export class UploadPostProvider implements PostingProvider {
       logger: options.logger,
       now: () => this.clock.now().getTime(),
     })
+    this.healthClient = new UploadPostClient({
+      apiKey: o.data.apiKey,
+      baseUrl: o.data.baseUrl,
+      fetch: options.fetch,
+      timeoutMs: Math.min(o.data.timeoutMs ?? HEALTH_CHECK_TIMEOUT_MS, HEALTH_CHECK_TIMEOUT_MS),
+      logger: options.logger,
+      now: () => this.clock.now().getTime(),
+    })
+  }
+
+  // --- health -------------------------------------------------------------------
+
+  /**
+   * The cheapest authenticated read (docs/research/upload-post.md): GET /api/uploadposts/users
+   * lists the account's profiles. Proves the API key and the plan work. Never throws; the detail
+   * never contains the key.
+   */
+  async healthCheck(): Promise<HealthCheckResult> {
+    try {
+      const res = await this.healthClient.request({ method: 'GET', path: '/api/uploadposts/users' })
+      const parsed = ProfilesResponseSchema.safeParse(res.body)
+      const count = parsed.success && parsed.data.profiles ? parsed.data.profiles.length : null
+      const limit = parsed.success ? (parsed.data.limit ?? null) : null
+      if (count === null) return { ok: true, detail: 'Upload-Post accepted the API key.' }
+      const of = limit !== null ? ` of ${limit}` : ''
+      return { ok: true, detail: `Upload-Post accepted the API key (${count}${of} profile${count === 1 && !of ? '' : 's'} in use).` }
+    } catch (err) {
+      const reason = providerErrorReason(err)
+      if (reason === 'provider_auth') {
+        return { ok: false, detail: 'Upload-Post refused the API key, or the plan is not active. Check UPLOAD_POST_API_KEY and your Upload-Post plan.' }
+      }
+      if (reason === 'rate_limited') return { ok: false, detail: 'Upload-Post is busy right now. Try again in a minute.' }
+      if (reason === 'provider_unavailable') return { ok: false, detail: 'Upload-Post could not be reached. Try again in a minute.' }
+      return { ok: false, detail: 'Upload-Post answered in an unexpected way. Try again in a minute.' }
+    }
   }
 
   // --- profiles ------------------------------------------------------------------

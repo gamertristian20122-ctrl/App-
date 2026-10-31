@@ -1,5 +1,6 @@
 // The sign-in screen (plain HTML forms posting to the auth routes; works without JavaScript).
 
+import { LegalLinks } from '@/components/legal/legal-links'
 import { Notice } from '@/components/ui/primitives'
 import { Logo } from '@/components/ui/logo'
 import { button, cx, hint, input, label } from '@/components/ui/styles'
@@ -76,8 +77,9 @@ export function LoginView({ next, sent, error, devAuth, magicLink }: {
           ) : null}
         </div>
         <p className="mt-6 text-center text-xs text-neutral-500">
-          By signing in you agree to use {PRODUCT_NAME} only with content you own or have the rights to.
+          By signing in you agree to the Terms and to use {PRODUCT_NAME} only with content you own or have the rights to.
         </p>
+        <LegalLinks className="mt-4 justify-center text-xs text-neutral-500" />
       </div>
     </main>
   )

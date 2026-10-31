@@ -24,6 +24,17 @@ const flag = z.preprocess(
   (v) => (typeof v === 'string' ? ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase()) : Boolean(v)),
   z.boolean(),
 )
+/** Optional free text (trimmed, control characters removed, cut at `max`); never fails validation. */
+const plainText = (max: number, map: (s: string) => string = (s) => s) =>
+  z.preprocess(
+    (v) => {
+      if (typeof v !== 'string') return undefined
+      // eslint-disable-next-line no-control-regex
+      const s = map(v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()).slice(0, max)
+      return s === '' ? undefined : s
+    },
+    z.string().optional(),
+  )
 const int = (def: number, min: number, max: number) =>
   z.preprocess(emptyToUndefined, z.coerce.number().int().min(min).max(max).default(def))
 
@@ -135,6 +146,20 @@ export const ConfigSchema = z
     // --- cron ---------------------------------------------------------------------
     /** Vercel cron sends "Authorization: Bearer <CRON_SECRET>". */
     CRON_SECRET: optionalSecret(16),
+
+    // --- owner, support and legal pages -----------------------------------------
+    // Lenient on purpose: a typo here must never take the whole app down. /setup flags values that
+    // do not look right, and the legal pages show "[set NAME]" placeholders for missing ones.
+    /** Sign-in email of the person who runs this deployment; only they can open /setup. */
+    OWNER_EMAIL: plainText(254, (s) => s.toLowerCase()),
+    /** Public support address (footer, legal pages, contact page, Stripe). */
+    SUPPORT_EMAIL: plainText(254),
+    /** The person or company that provides the service (legal pages). */
+    LEGAL_ENTITY_NAME: plainText(200),
+    /** Whose law governs the terms, e.g. "the State of Delaware, United States". */
+    LEGAL_JURISDICTION: plainText(200),
+    /** When the current terms and privacy policy took effect (YYYY-MM-DD). */
+    LEGAL_EFFECTIVE_DATE: plainText(40),
 
     // --- worker ---------------------------------------------------------------
     /** Comma list of worker groups to run: posting, media (or "all"). */

@@ -129,6 +129,31 @@ describe('optional billing and provider keys', () => {
   })
 })
 
+describe('owner and legal keys', () => {
+  it('are empty by default', () => {
+    const c = loadConfig({})
+    for (const key of ['OWNER_EMAIL', 'SUPPORT_EMAIL', 'LEGAL_ENTITY_NAME', 'LEGAL_JURISDICTION', 'LEGAL_EFFECTIVE_DATE'] as const) {
+      expect(c[key]).toBeUndefined()
+    }
+    expect(loadConfig({ SUPPORT_EMAIL: '   ' }).SUPPORT_EMAIL).toBeUndefined()
+  })
+
+  it('trims them, lower-cases the owner email and never fails on odd values', () => {
+    const c = loadConfig({
+      OWNER_EMAIL: '  Owner@Example.COM ',
+      SUPPORT_EMAIL: ' help@example.com ',
+      LEGAL_ENTITY_NAME: 'Acme\nStudio LLC',
+      LEGAL_JURISDICTION: 'the State of Delaware, United States',
+      LEGAL_EFFECTIVE_DATE: 'not a date',
+    })
+    expect(c.OWNER_EMAIL).toBe('owner@example.com')
+    expect(c.SUPPORT_EMAIL).toBe('help@example.com')
+    expect(c.LEGAL_ENTITY_NAME).toBe('Acme Studio LLC')
+    expect(c.LEGAL_EFFECTIVE_DATE).toBe('not a date')
+    expect(loadConfig({ LEGAL_ENTITY_NAME: 'x'.repeat(500) }).LEGAL_ENTITY_NAME).toHaveLength(200)
+  })
+})
+
 describe('.env.example', () => {
   const text = readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8')
   const env = Object.fromEntries(

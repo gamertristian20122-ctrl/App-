@@ -12,7 +12,7 @@
 
 import { z } from 'zod'
 import type { Logger } from '@app/core/log'
-import type { TranscriptResult, Transcriber } from '@app/core/ports'
+import type { HealthCheckResult, TranscriptResult, Transcriber } from '@app/core/ports'
 import { isAppError } from '@app/core/errors'
 import { safeEngineMessage, transcriptionError } from './errors'
 import { normalizeTranscript } from './normalize'
@@ -21,6 +21,7 @@ import {
   fetchWithTimeout,
   httpError,
   openAudioFile,
+  probeStatus,
   readJson,
   realSleep,
   retryAfterSec,
@@ -139,6 +140,19 @@ export class AssemblyAITranscriber implements Transcriber {
 
   private malformed(what: string) {
     return transcriptionError('malformed_response', `AssemblyAI returned an unexpected ${what} response.`, { engine: ENGINE })
+  }
+
+  /**
+   * Is ASSEMBLYAI_API_KEY valid? GET /v2/transcript?limit=1 (list transcripts): authenticated,
+   * free, and starts nothing. Never throws; the detail never contains the key.
+   */
+  async healthCheck(): Promise<HealthCheckResult> {
+    const status = await probeStatus(this.fetchFn, `${this.base}/v2/transcript?limit=1`, this.headers())
+    if (status === null) return { ok: false, detail: 'AssemblyAI could not be reached.' }
+    if (status === 401 || status === 403) return { ok: false, detail: 'AssemblyAI refused ASSEMBLYAI_API_KEY.' }
+    if (status === 429) return { ok: false, detail: 'AssemblyAI is busy right now. Try again in a minute.' }
+    if (status >= 200 && status < 300) return { ok: true, detail: 'AssemblyAI accepted the API key.' }
+    return { ok: false, detail: `AssemblyAI answered with an error (HTTP ${status}).` }
   }
 
   async transcribe(input: TranscribeInput): Promise<TranscriptResult> {

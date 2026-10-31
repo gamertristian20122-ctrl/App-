@@ -8,6 +8,7 @@ import type { Services } from '@app/services'
 import { redirect } from 'next/navigation'
 import { getCurrentUser, type CurrentUser } from '@/lib/auth'
 import { getServicesRuntime } from '@/lib/services'
+import { ownerEmailOf } from '@/lib/server/owner'
 
 export interface UiRuntime {
   services: Services
@@ -17,6 +18,8 @@ export interface UiRuntime {
   mcpUrl: string
   now(): Date
   log: Logger
+  /** OWNER_EMAIL, normalized (null when unset): the owner sees a Setup link in the navigation. */
+  ownerEmail?: string | null
 }
 
 interface Overrides {
@@ -48,6 +51,7 @@ export async function getUiRuntime(): Promise<UiRuntime> {
     mcpUrl: rt.config.MCP_RESOURCE_URL ?? `${rt.config.APP_URL}/api/mcp`,
     now: () => rt.clock.now(),
     log: rt.log,
+    ownerEmail: ownerEmailOf(rt.config),
   }
 }
 

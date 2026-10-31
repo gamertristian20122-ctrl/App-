@@ -11,6 +11,7 @@ export {
   ContentTypeSchema,
 } from './validate'
 export * from './multipart'
+export * from './bucket'
 export { R2Storage, createR2Client, r2Endpoint, mapS3Error, DEFAULT_MULTIPART_THRESHOLD_BYTES } from './r2'
 export type { R2StorageConfig, R2StorageDeps, S3Like, Presigner } from './r2'
 export { LocalStorageBase, type LocalStorageOptions, type LocalBackend, type LocalObject } from './local/base'

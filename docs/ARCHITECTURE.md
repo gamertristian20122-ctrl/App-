@@ -57,6 +57,8 @@ Tables (all have `created_at`; mutable ones have `updated_at` maintained by trig
 18. `approval_nonces` — nonce_hash PK, user_id, draft_id, revision, expires_at, used_at. One-time nonce embedded (UI-only `_meta`) in the approval card and in web approve links.
 19. `stripe_events` — id text PK (Stripe event id), type, processed_at.
 20. `audit_log` — id, user_id, actor, action, subject_type, subject_id, meta jsonb (never secrets).
+21. `app_settings` (0005) — key text PK, value, encrypted bool, created_at, updated_at. Deployment-wide values the owner's `/setup` creates: the Stripe webhook signing secret per mode (sealed with `TOKEN_ENCRYPTION_KEYS`, AAD = the key) and the portal configuration id. Server-only (RLS, no policies).
+22. `worker_heartbeats` (0005) — worker_id PK, types text[] (posting/media), last_seen_at, version, started_at. Each worker upserts every 60 s; `/setup` reads the age by the database clock. Server-only.
 
 ## Plans and metering (`packages/core/src/plans.ts` — single source of truth)
 
@@ -94,7 +96,10 @@ interface PostingProvider {
   listPastPosts(i: { profileRef: string; platform: Platform; cursor?: string; limit?: number }): Promise<{ posts: PastPostInput[]; nextCursor?: string }>
 }
 interface ObjectStorage { presignPut(key, contentType, maxBytes): Promise<{ url; headers }>; presignGet(key, ttlSec): Promise<string>; putFile(key, path, contentType): Promise<void>; putBytes(key, bytes, contentType): Promise<void>; getToFile(key, path): Promise<void>; head(key): Promise<{ bytes: number; contentType: string } | null>; delete(key): Promise<void> }
-interface Transcriber { readonly name: string; transcribe(i: { filePath: string; language?: string }): Promise<TranscriptResult> } // { language, durationMs, text, words: {s,e,t}[], segments: {s,e,t}[] }
+interface Transcriber { readonly name: string; transcribe(i: { filePath: string; language?: string }): Promise<TranscriptResult>; healthCheck?(): Promise<HealthCheckResult> } // { language, durationMs, text, words: {s,e,t}[], segments: {s,e,t}[] }
+// PostingProvider and Transcriber also have an optional healthCheck(): Promise<{ ok: boolean; detail?: string }>:
+// the cheapest authenticated call (Upload-Post GET /api/uploadposts/users, AssemblyAI GET /v2/transcript?limit=1,
+// Whisper GET /v1/models). Never throws; used only by the owner's /setup page.
 interface Clock { now(): Date }
 ```
 
@@ -130,7 +135,7 @@ MCP App: `ui://approval-card/v1` (`text/html;profile=mcp-app`), self-contained H
 
 ## Web app (`apps/web`)
 
-Supabase Auth (magic link) for humans; `DEV_AUTH=1` enables a local email-only login for development and tests. Pages: `/` (landing + pricing), `/login`, `/app` (overview + usage), `/app/approvals` (queue with per-platform preview; approve/edit/reject; "Auto-posted" badge), `/app/calendar` ("Auto-posted" badge), `/app/brands` (incl. the Auto-post switch), `/app/accounts`, `/app/media` (uploads, rights checkbox), `/app/clips`, `/app/voice`, `/app/analytics`, `/app/billing`, `/app/connect` (how to add the MCP server to Claude/ChatGPT/Cursor/Claude Code, and the auto pipeline), `/oauth/authorize` (consent), `/approve/[nonce]` (one-click web approval). API: `/api/mcp`, `/oauth/register|token|revoke`, `/.well-known/*`, `/api/stripe/webhook`, `/api/stripe/checkout`, `/api/stripe/portal`, `/api/uploads` (presign + complete), `/api/webhooks/upload-post`, `/api/cron/*` (Vercel cron → enqueue analytics jobs). Every route has a test.
+Supabase Auth (magic link) for humans; `DEV_AUTH=1` enables a local email-only login for development and tests. Pages: `/` (landing + pricing), `/login`, `/app` (overview + usage), `/app/approvals` (queue with per-platform preview; approve/edit/reject; "Auto-posted" badge), `/app/calendar` ("Auto-posted" badge), `/app/brands` (incl. the Auto-post switch), `/app/accounts`, `/app/media` (uploads, rights checkbox), `/app/clips`, `/app/voice`, `/app/analytics`, `/app/billing`, `/app/connect` (how to add the MCP server to Claude/ChatGPT/Cursor/Claude Code, and the auto pipeline), `/oauth/authorize` (consent), `/approve/[nonce]` (one-click web approval), `/privacy`, `/terms`, `/contact` (values from `LEGAL_*` / `SUPPORT_EMAIL`, `[set NAME]` placeholders when missing; linked from every footer), `/setup` (the owner's launch checklist: only `OWNER_EMAIL`, a 404 for everyone else; checks every external service through the packages' health checks and a small Stripe admin helper, and four idempotent, rate-limited, audited fixes). API: `/api/mcp`, `/oauth/register|token|revoke`, `/.well-known/*`, `/api/stripe/webhook`, `/api/stripe/checkout`, `/api/stripe/portal`, `/api/uploads` (presign + complete), `/api/webhooks/upload-post`, `/api/cron/*` (Vercel cron → enqueue analytics jobs). Every route has a test.
 
 ## Worker (`apps/worker`)
 

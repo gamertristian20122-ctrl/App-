@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { PG_ERROR } from '../src/errors'
 import * as analytics from '../src/repos/analytics'
+import * as appSettings from '../src/repos/appSettings'
+import * as workerHeartbeats from '../src/repos/workerHeartbeats'
 import * as approvalNonces from '../src/repos/approvalNonces'
 import * as audit from '../src/repos/audit'
 import * as clips from '../src/repos/clips'
@@ -40,6 +42,8 @@ const SERVICE_TABLES = [
   'approval_nonces',
   'stripe_events',
   'audit_log',
+  'app_settings',
+  'worker_heartbeats',
   'schema_migrations',
 ] as const
 
@@ -93,6 +97,8 @@ async function seedEverything(): Promise<string> {
   await approvalNonces.create(db, userId, { nonceHash: sha(randomUUID()), draftId: draft.id, revision: draft.revision, expiresAt: new Date(Date.now() + 60_000) })
   await stripeEvents.record(db, { id: `evt_${randomUUID().replace(/-/g, '')}`, type: 'customer.subscription.updated' })
   await audit.record(db, { userId, actor: 'web', action: 'draft.approved', subjectType: 'draft', subjectId: draft.id })
+  await appSettings.set(db, 'setup.test', 'v1:sealed-value', { encrypted: true })
+  await workerHeartbeats.beat(db, { workerId: `worker-${randomUUID()}`, types: ['posting'] })
   return userId
 }
 
