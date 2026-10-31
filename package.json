@@ -1,0 +1,24 @@
+{
+  "name": "app-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "lint": "node scripts/check-boundaries.mjs",
+    "build": "pnpm -r build",
+    "secrets": "node scripts/generate-secrets.mjs",
+    "test:pg": "node scripts/test-postgres.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

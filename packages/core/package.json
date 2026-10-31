@@ -1,0 +1,29 @@
+{
+  "name": "@app/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./ports": "./src/ports.ts",
+    "./plans": "./src/plans.ts",
+    "./platforms": "./src/platforms.ts",
+    "./validation": "./src/validation.ts",
+    "./links": "./src/links.ts",
+    "./crypto": "./src/crypto.ts",
+    "./log": "./src/log.ts",
+    "./hash": "./src/hash.ts",
+    "./errors": "./src/errors.ts",
+    "./config": "./src/config.ts",
+    "./time": "./src/time.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

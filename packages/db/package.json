@@ -1,0 +1,20 @@
+{
+  "name": "@app/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "migrate": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@app/core": "workspace:*",
+    "@electric-sql/pglite": "^0.5.13",
+    "postgres": "^3.4.9"
+  }
+}
